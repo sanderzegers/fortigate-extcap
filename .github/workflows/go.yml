@@ -32,24 +32,10 @@ jobs:
 #      run: go test -v ./...
 
 
-    - name: Create a release
-      id: create_release
-      uses: actions/create-release@v1
-      with:
-        tag_name: ${{ github.ref_name }} # The tag triggering the workflow
-        release_name: Release ${{ github.ref_name }}
-        body: |
-          Release notes can go here.
-        draft: false
-        prerelease: false
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Upload release asset
-      uses: actions/upload-release-asset@v1
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./my_binary.tar.gz
-        asset_name: my_binary.tar.gz
-        asset_content_type: application/gzip
+  - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@master
+        with:
+          version: latest
+          args: release --rm-dist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GO_RELEASER_GITHUB_TOKEN }}
