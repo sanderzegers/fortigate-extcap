@@ -30,14 +30,18 @@ jobs:
 
 #    - name: Test
 #      run: go test -v ./...
+  
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
     - name: Run GoReleaser
-      uses: goreleaser/goreleaser-action@v6
+      uses: goreleaser/goreleaser-action@v5
       with:
           # either 'goreleaser' (default) or 'goreleaser-pro'
           distribution: goreleaser
           # 'latest', 'nightly', or a semver
-          version: '~> v2'
-          args: release --clean --snapshot
+          version: '~> v1'
+          args: release --clean
       env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
