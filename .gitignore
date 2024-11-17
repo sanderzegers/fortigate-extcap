@@ -7,6 +7,10 @@
 *.dll
 *.so
 *.dylib
+*.bat
+*.pcap
+*.pcapng
+*.log.txt
 
 # Test binary, built with `go test -c`
 *.test
@@ -20,6 +24,10 @@
 # Go workspace file
 go.work
 go.work.sum
+launch.json
+
+# Debug files
+fortidumplog.txt
 
 # env file
 .env
