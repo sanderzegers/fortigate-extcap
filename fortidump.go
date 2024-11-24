@@ -1,13 +1,11 @@
 package main
 
 // Wireshark EXTCAP extension for capturing packets on a Fortigate.
-// Tested with FortiOS 7.4.x
-// FortiOS >=7.0.13 and >=7.2.6 broken due to missing support of SSH-ED25519 in go library
+// Tested with FortiOS 7.4.6, FortiOS 7.2.10
 // Author: Sander Zegers
 // Version: 0.1a
 // License: GNU General Public License v2.0
 
-//TODO: Find options to connect to FortiOS 7.0.x and 7.2.x
 //TODO: Optimize singlecommand
 //TODO: SSH Certificate Authentication
 //TODO: SSH Host Key verification
@@ -64,6 +62,7 @@ type sshShell struct {
 var currentLogLevel = logLevelError
 var captureStartTimestamp int64 //Timestamp when packet capture was launched
 var debugLogEnabled = false
+var vdomCheckEnabled = false
 
 // Store debug messages in log file, if debugLogEnabled is set to true
 func debuglog(level int, format string, args ...interface{}) {
@@ -204,21 +203,20 @@ func extcap_config(iface string) {
 	fmt.Println("arg {number=1}{call=--port}{display=Fortigate SSH Port}{type=unsigned}{tooltip=The remote SSH host port (1-65535)}{range=1,65535}{default=22}{required=true}{group=Server}")
 	fmt.Println("arg {number=2}{call=--capture-filter}{display=Capture filter}{type=string}{tooltip=tcpdump filter}{default=not port 22}{required=true}{group=Server}")
 	fmt.Println("arg {number=3}{call=--capture-interface}{display=Interface}{type=string}{tooltip=filter by interface}{default=any}{required=true}{group=Server}")
-	fmt.Println("arg {number=4}{call=--vdom}{display=Multi-VDOM mode}{type=boolean}{tooltip=Fortigate is configured for multi-VDOM mode}{default=false}{required=false}{group=Server}")
 
 	// Authentication Tab
-	fmt.Println("arg {number=5}{call=--username}{display=Username}{type=string}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=true}{group=Authentication}")
-	fmt.Println("arg {number=6}{call=--password}{display=Password}{type=password}{tooltip=The SSH password, used when other methods (SSH agent or key files) are unavailable.}{group=Authentication}")
-	fmt.Println("arg {number=7}{call=--sshkey}{display=Path to SSH Private Key}{type=fileselect}{tooltip=The path on the local filesystem of the private ssh key}{group=Authentication}")
+	fmt.Println("arg {number=4}{call=--username}{display=Username}{type=string}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=true}{group=Authentication}")
+	fmt.Println("arg {number=5}{call=--password}{display=Password}{type=password}{tooltip=The SSH password, used when other methods (SSH agent or key files) are unavailable.}{group=Authentication}")
+	fmt.Println("arg {number=6}{call=--sshkey}{display=Path to SSH Private Key}{type=fileselect}{tooltip=The path on the local filesystem of the private ssh key}{group=Authentication}")
 
 	// Debug Tab
-	fmt.Println("arg {number=8}{call=--log-level}{display=Set the log level}{type=selector}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=false}{group=Debug}")
-	fmt.Println("value {arg=8}{value=" + strconv.Itoa(logLevelError) + "}{display=Error}")
-	fmt.Println("value {arg=8}{value=" + strconv.Itoa(logLevelWarn) + "}{display=Warning}")
-	fmt.Println("value {arg=8}{value=" + strconv.Itoa(logLevelInfo) + "}{display=Info}")
-	fmt.Println("value {arg=8}{value=" + strconv.Itoa(logLevelDebug) + "}{display=Debug}")
-
-	fmt.Println("arg {number=9}{call=--log-file}{display=Use a file for logging}{type=fileselect}{tooltip=Set a file where log messages are written}{required=false}{group=Debug}")
+	fmt.Println("arg {number=7}{call=--log-level}{display=Set the log level}{type=selector}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=false}{group=Debug}")
+	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelError) + "}{display=Error}")
+	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelWarn) + "}{display=Warning}")
+	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelInfo) + "}{display=Info}")
+	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelDebug) + "}{display=Debug}")
+	fmt.Println("arg {number=8}{call=--log-file}{display=Use a file for logging}{type=fileselect}{tooltip=Set a file where log messages are written}{required=false}{group=Debug}")
+	fmt.Println("arg {number=9}{call=--vdom}{display=Multi-VDOM check}{type=boolean}{tooltip=Fortigate VDOM Support}{default=false}{required=false}{group=Debug}")
 
 }
 
@@ -250,13 +248,16 @@ func main() {
 	extcapSshKey := flag.String("sshkey", "", "Path of ssh key used for passwordless authentication")
 	extcapCaptureFilter := flag.String("capture-filter", "none", "Diagnose sniffer packet capture filter")
 	extcapCaptureInterface := flag.String("capture-interface", "any", "Capture interface on Fortigate")
-	extcapVdom := flag.String("vdom", "", "Vdom where capture is running, use if Fortigate is in vdom mode")
 	extcapLogLevel := flag.Int("log-level", logLevelError, "Loglevel Debug(0) - Error(3) / Default 3")
 	extcapLogFile := flag.String("log-file", "", "Log filename")
+	extcapVdomCheck := flag.String("vdom", "false", "Enable VDOM check, and enter management VDOM")
 
 	flag.Parse()
 
 	currentLogLevel = *extcapLogLevel
+	if *extcapVdomCheck == "true" {
+		vdomCheckEnabled = true
+	}
 
 	if *extcapLogFile != "" {
 
@@ -281,6 +282,7 @@ func main() {
 	debuglog(logLevelError, "logLevelError")
 
 	allArgs := strings.Join(os.Args[1:], " ")
+
 	debuglog(logLevelDebug, allArgs)
 
 	if !*extcapInterfaces && *extcapInterface == "" {
@@ -329,7 +331,7 @@ func main() {
 			os.Exit(errorFifo)
 		}
 
-		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapVdom)
+		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			debuglog(logLevelError, "Fatal: %s", err)
@@ -460,7 +462,7 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File)
 
 	sshShellSession.bufferIn.Write([]byte(cmd + "\n"))
 
-	pcapCompileError, _ := regexp.Compile("(?ms)^pcap_compile:(.*)|pcap_activate:(.*)")
+	pcapCompileError, _ := regexp.Compile("(?ms)^pcap_compile:(.*)|^pcap_activate:(.*)|^Command fail(.*)")
 
 	for scanner.Scan() {
 		*lineBuffer += scanner.Text() + "\n"
@@ -494,7 +496,7 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File)
 	return nil
 }
 
-func startCaptureSession(filename *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string, vdom *string) error {
+func startCaptureSession(filename *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string) error {
 
 	pcap_file, _ := createPcapFile(*filename)
 
@@ -511,27 +513,31 @@ func startCaptureSession(filename *string, username *string, password *string, h
 
 	sniffCommand := fmt.Sprintf(`diagnose sniffer packet %s "%s" 6`, *captureInterface, *captureFilter)
 
-	vdomtext, err := runSingleCommand(sshSession, "get system status | grep \"Current virtual\"")
-	if err != nil {
-		return err
+	if vdomCheckEnabled {
+
+		vdomtext, err := runSingleCommand(sshSession, "get system status | grep \"Current virtual\"")
+		if err != nil {
+			return err
+		}
+
+		vdomtext = strings.TrimSpace(strings.Split(vdomtext, ":")[1])
+		debuglog(logLevelInfo, vdomtext)
+
+		result, err = runSingleCommand(sshSession, "config vdom")
+		if err != nil {
+			return err
+		}
+
+		debuglog(logLevelInfo, result)
+
+		result, err = runSingleCommand(sshSession, fmt.Sprintf("edit %s", vdomtext))
+		if err != nil {
+			return err
+		}
+
+		debuglog(logLevelInfo, result)
+
 	}
-
-	vdomtext = strings.TrimSpace(strings.Split(vdomtext, ":")[1])
-	debuglog(logLevelInfo, vdomtext)
-
-	result, err = runSingleCommand(sshSession, "config vdom")
-	if err != nil {
-		return err
-	}
-
-	debuglog(logLevelInfo, result)
-
-	result, err = runSingleCommand(sshSession, fmt.Sprintf("edit %s", vdomtext))
-	if err != nil {
-		return err
-	}
-
-	debuglog(logLevelInfo, result)
 
 	err = runSnifferCommand(sshSession, sniffCommand, pcap_file)
 	if err != nil {
