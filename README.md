@@ -4,22 +4,32 @@
 
 ## Description
 
-This Wireshark Extcap extension enables the capture of live network packets directly from Fortigate devices, supporting multiple Virtual Domains (VDOMs). It is designed to integrate with Wireshark, providing a straightforward solution for network administrators and security professionals to monitor and troubleshoot their networks.
+This Wireshark Extcap extension enables live network packet capture directly from Fortigate devices into Wireshark.
 
+asdfsadfadsf
 ![Wireshark Screenshot](images/wireshark-extcap.png)
 
 ## Features
 
-- Capture packets live to Wireshark
+- Capture packets live into Wireshark
 - Fortigate VDOM Support
 - Simple installation
 
 ## Installation
 
-1. Launch Wireshark.
-2. Go to "Help" -> "About Wireshark" -> "Folders" -> "Personal Extcap Path".
-3. Copy the `fortidump.exe` file from this repository into the "Personal Extcap Path" folder.
-4. Restart Wireshark to enable the custom extcap extension.
+1. Download the Latest Version
+ - Visit the [Releases](https://github.com/sanderzegers/fortigate-extcap/releases/) page and download the version that matches your platform.
+
+2. Locate the Personal Extcap Path
+ - Open Wireshark.
+ - Navigate to Help → About Wireshark → Folders → Personal Extcap Path.
+ - Click the Location to open the Extcap folder.
+
+3. Copy the binary to excapt folder
+ - From the downloaded release, copy the fortigate-extcap.exe (or the appropriate file for your platform) into the "Personal Extcap Path" directory.
+
+4. Restart Wireshark
+ - Restart Wireshark to load the custom extcap extension.
 
 ## Known limitations
 

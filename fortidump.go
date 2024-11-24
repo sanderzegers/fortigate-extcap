@@ -10,7 +10,6 @@ package main
 //TODO: SSH Certificate Authentication
 //TODO: SSH Host Key verification
 //TODO: pre-login-banner / post-login-banner support
-//TOFIX: No error messages in Wireshark when logfile enabled
 
 import (
 	"bufio"
