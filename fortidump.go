@@ -7,9 +7,10 @@ package main
 // Version: 0.1a
 // License: GNU General Public License v2.0
 
+//TODO: Find options to connect to FortiOS 7.0.x and 7.2.x
 //TODO: Optimize singlecommand
 //TODO: SSH Certificate Authentication
-//TODO: SSH Key verification
+//TODO: SSH Host Key verification
 //TODO: pre-login-banner / post-login-banner support
 //TOFIX: No error messages in Wireshark when logfile enabled
 
@@ -115,8 +116,7 @@ func addPacketToPcapFile(file *os.File, packet networkPacket) error {
 func createPcapFile(filename string) (*os.File, error) {
 	file, err := os.Create(filename)
 	if err != nil {
-		//panic(fmt.Sprintf("Error opening file %s", err))
-
+		return nil, err
 	}
 	// Pcap file header
 	file.Write([]byte{
@@ -151,8 +151,8 @@ func extractSinglePacket(input_data *string) (*networkPacket, error) {
 
 	if matches != nil {
 		for _, match := range matches { //should never return more than 1 match
-			debuglog(logLevelInfo, "\n\n\nmatches found", len(matches))
-			debuglog(logLevelDebug, "\nFull match:", match[0])
+			debuglog(logLevelInfo, "\n\n\nmatches found %d", len(matches))
+			debuglog(logLevelDebug, "\nFull match: %s", match[0])
 			for i, group := range match[1:] {
 
 				switch {
@@ -194,7 +194,7 @@ func extractSinglePacket(input_data *string) (*networkPacket, error) {
 		}
 		return &packet, nil
 	}
-	return nil, errors.New("No packet found")
+	return nil, errors.New("no packet found")
 }
 
 func extcap_config(iface string) {
@@ -262,8 +262,8 @@ func main() {
 
 		logfile, err := os.OpenFile(*extcapLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Failed to open log file:", err)
-			debuglog(logLevelError, "Fatal: Failed to open log file:", err)
+			fmt.Fprintln(os.Stderr, "Failed to open log file")
+			debuglog(logLevelError, "Fatal: Failed to open log file:  %s", err)
 		}
 		defer logfile.Close()
 
@@ -350,7 +350,8 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 		Auth: []ssh.AuthMethod{
 			ssh.Password(*password),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Note: Do not use this in production!
+		HostKeyCallback:   ssh.InsecureIgnoreHostKey(), // Note: Do not use this in production!
+		HostKeyAlgorithms: []string{"ssh-ed25519", "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384"},
 	}
 
 	client, err := ssh.Dial("tcp", *hostname+":"+strconv.Itoa(*port), config)
