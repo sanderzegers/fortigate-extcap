@@ -273,6 +273,7 @@ func main() {
 	sshKnownHostsfile = *extcapKnownHostsFile
 
 	currentLogLevel = *extcapLogLevel
+
 	if *extcapVdomCheck == "true" {
 		vdomCheckEnabled = true
 	}
@@ -352,7 +353,7 @@ func main() {
 
 		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			//fmt.Fprintln(os.Stderr, err)
 			debuglog(logLevelError, "Fatal: %s", err)
 			os.Exit(errorDelay)
 		}
@@ -361,28 +362,20 @@ func main() {
 
 }
 
-func errCallBack(e error) {
-	debuglog(logLevelDebug, "errCallBack")
-	if e != nil {
-		log.Fatal(e)
-	}
-}
-
-func checkKnownHosts() ssh.HostKeyCallback {
-	createKnownHosts()
-
-	kh, e := knownhosts.New(sshKnownHostsfile)
-	errCallBack(e)
-	return kh
-}
-
-func createKnownHosts() {
-
-	f, fErr := os.OpenFile((sshKnownHostsfile), os.O_CREATE, 0600)
-	if fErr != nil {
-		log.Fatal(fErr)
+func checkKnownHosts() (ssh.HostKeyCallback, error) {
+	f, err := os.OpenFile((sshKnownHostsfile), os.O_CREATE, 0600)
+	if err != nil {
+		debuglog(logLevelError, "sshKnownHostsfile failed: %s", err)
+		return nil, err
 	}
 	f.Close()
+
+	kh, err := knownhosts.New(sshKnownHostsfile)
+	if err != nil {
+		debuglog(logLevelError, "knownhosts failed: %s", err)
+		return nil, err
+	}
+	return kh, nil
 }
 
 func addHostKey(host string, remote net.Addr, pubKey ssh.PublicKey) error {
@@ -417,18 +410,19 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 			ssh.Password(*password),
 		},
 		HostKeyCallback: ssh.HostKeyCallback(func(host string, remote net.Addr, pubKey ssh.PublicKey) error {
-			kh := checkKnownHosts()
+			kh, kHErr := checkKnownHosts()
 			hErr := kh(host, remote, pubKey)
-
-			if errors.As(hErr, &keyErr) && len(keyErr.Want) > 0 {
-
-				log.Printf("WARNING: not a key of %s, either a MiTM attack or %s has reconfigured the host pub key.", host, host)
+			if kHErr != nil {
+				return kHErr
+			} else if errors.As(hErr, &keyErr) && len(keyErr.Want) > 0 {
+				fmt.Fprintln(os.Stderr, "SSH Public key authentication failed, check known_hosts file")
+				debuglog(logLevelError, "Public key does not match known_hosts file: %s", host)
 				return keyErr
 			} else if errors.As(hErr, &keyErr) && len(keyErr.Want) == 0 {
-				log.Printf("WARNING: %s is not trusted, adding key to known_hosts file.", host)
+				debuglog(logLevelInfo, "%s is not trusted, adding key to known_hosts file.", host)
 				return addHostKey(host, remote, pubKey)
 			}
-			log.Printf("Pub key exists for %s.", host)
+			debuglog(logLevelInfo, "Public key found for %s in trusted hosts", host)
 			return nil
 		}),
 		HostKeyAlgorithms: []string{"ssh-ed25519", "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384"},
@@ -440,9 +434,9 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 	}
 
 	sshShellSession.session, err = client.NewSession()
-
 	if err != nil {
-		log.Fatal(err)
+		debuglog(logLevelError, "Session Error: %s", err)
+		return nil, err
 	}
 
 	sshShellSession.bufferIn, err = sshShellSession.session.StdinPipe()
@@ -464,12 +458,14 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 
 	err = sshShellSession.session.RequestPty("xterm", 80, 40, modes)
 	if err != nil {
-		panic(fmt.Sprintf("request for pseudo terminal failed: %s", err))
+		debuglog(logLevelError, "request for pseudo terminal failed: %s", err)
+		return nil, err
 	}
 
 	err = sshShellSession.session.Shell()
 	if err != nil {
-		panic(fmt.Sprintf("failed to start shell: %s", err))
+		debuglog(logLevelError, "failed to start shell: %s", err)
+		return nil, err
 	}
 
 	// Retrieve Shell prompt
@@ -560,7 +556,8 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File)
 		debuglog(logLevelDebug, "Reading command: %s", *lineBuffer)
 		if packet, err := extractSinglePacket(lineBuffer); err == nil {
 			if err := addPacketToPcapFile(pcapfile, *packet); err != nil {
-				panic(fmt.Sprintf("Packet write error: %s", err))
+				debuglog(logLevelError, "Packet write error: %s", err)
+				return err
 			}
 		}
 	}
