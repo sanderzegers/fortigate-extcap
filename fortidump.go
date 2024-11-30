@@ -173,11 +173,9 @@ func extractSinglePacket(input_data *string) (*networkPacket, error) {
 				case i == 5:
 					packetData := ""
 					submatch := packetDataRegex.FindAllStringSubmatch(group, -1)
-					if submatch != nil {
-						for _, matchie := range submatch {
-							for _, groupie := range matchie[1:] {
-								packetData = packetData + groupie
-							}
+					for _, matchie := range submatch {
+						for _, groupie := range matchie[1:] {
+							packetData = packetData + groupie
 						}
 					}
 					debuglog(logLevelDebug, "packetData: %s\n", packetData)
@@ -195,7 +193,7 @@ func extractSinglePacket(input_data *string) (*networkPacket, error) {
 	return nil, errors.New("no packet found")
 }
 
-func extcap_config(iface string) {
+func extcap_config() {
 
 	// Server Tab
 	fmt.Println("arg {number=0}{call=--host}{display=Fortigate Address}{type=string}{tooltip=The remote Fortigate. It can be both an IP address or a hostname}{required=true}{group=Server}")
@@ -298,7 +296,7 @@ func main() {
 	}
 
 	if *extcapConfig {
-		extcap_config("")
+		extcap_config()
 		return
 	}
 
@@ -452,7 +450,7 @@ func runSingleCommand(sshShellSession *sshShell, cmd string) (string, error) {
 	return *lineBuffer, nil
 }
 
-// Run sniffer command, wo don't expect to return from here unless there's an error
+// Run sniffer command, wo don't expect to return from here unless packet count is hit
 func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File) error {
 
 	debuglog(logLevelDebug, "runSnifferCommand()")
@@ -471,10 +469,8 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File)
 	for scanner.Scan() {
 		*lineBuffer += scanner.Text() + "\n"
 		matches := pcapCompileError.FindAllStringSubmatch(*lineBuffer, -1)
-		if matches != nil {
-			for _, match := range matches {
-				return (fmt.Errorf("command line error: %s", match[0][1:]))
-			}
+		for _, match := range matches {
+			return (fmt.Errorf("command line error: %s", match[0][1:]))
 		}
 		matches = pcapCompileEndOfCapture.FindAllStringSubmatch(*lineBuffer, -1)
 		if matches != nil {
