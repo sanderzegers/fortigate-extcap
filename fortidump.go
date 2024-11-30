@@ -3,7 +3,7 @@ package main
 // Wireshark EXTCAP extension for capturing packets on a Fortigate.
 // Tested with FortiOS 7.4.6, FortiOS 7.2.10
 // Author: Sander Zegers
-// Version: 0.1a
+// Version: 0.0.3alpha
 // License: GNU General Public License v2.0
 
 //TODO: Optimize singlecommand
@@ -216,15 +216,16 @@ func extcap_config(iface string) {
 	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelDebug) + "}{display=Debug}")
 	fmt.Println("arg {number=8}{call=--log-file}{display=Use a file for logging}{type=fileselect}{tooltip=Set a file where log messages are written}{required=false}{group=Debug}")
 	fmt.Println("arg {number=9}{call=--vdom}{display=Multi-VDOM check}{type=boolean}{tooltip=Fortigate VDOM Support}{default=false}{required=false}{group=Debug}")
+	fmt.Println("arg {number=10}{call=--packetlimit}{display=Packet count}{type=unsigned}{tooltip=Limit the maximum packet count. 0=unlimited}{default=1000}{required=true}{group=Debug}")
 
 }
 
 func extcap_version() {
-	fmt.Println("extcap {version=1.0}")
+	fmt.Println("extcap {version=0.0.3-alpha}{help=https://sanderzegers.github.io/fortigate-extcap/}")
 }
 
 func extcap_interfaces() {
-	fmt.Println("interface {value=fortigodump}{display=Fortigate Remote Capture (SSH)}")
+	fmt.Println("interface {value=fortidump}{display=Fortigate Remote Capture (SSH)}")
 }
 
 func main() {
@@ -250,6 +251,7 @@ func main() {
 	extcapLogLevel := flag.Int("log-level", logLevelError, "Loglevel Debug(0) - Error(3) / Default 3")
 	extcapLogFile := flag.String("log-file", "", "Log filename")
 	extcapVdomCheck := flag.String("vdom", "false", "Enable VDOM check, and enter management VDOM")
+	extcapPacketLimit := flag.Int("packetlimit", 1000, "Limit packet capture count")
 
 	flag.Parse()
 
@@ -290,6 +292,7 @@ func main() {
 	}
 
 	if *extcapInterfaces {
+		extcap_version()
 		extcap_interfaces()
 		return
 	}
@@ -330,7 +333,7 @@ func main() {
 			os.Exit(errorFifo)
 		}
 
-		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter)
+		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			debuglog(logLevelError, "Fatal: %s", err)
@@ -379,8 +382,8 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          0,
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
+		ssh.TTY_OP_ISPEED: 115200,
+		ssh.TTY_OP_OSPEED: 115200,
 	}
 
 	err = sshShellSession.session.RequestPty("xterm", 80, 40, modes)
@@ -460,16 +463,22 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File)
 	scanner := bufio.NewScanner(sshShellSession.bufferOut)
 
 	sshShellSession.bufferIn.Write([]byte(cmd + "\n"))
+	sshShellSession.bufferIn.Write([]byte("###EndOfCaptureReached###\n"))
 
 	pcapCompileError, _ := regexp.Compile("(?ms)^pcap_compile:(.*)|^pcap_activate:(.*)|^Command fail(.*)")
+	pcapCompileEndOfCapture, _ := regexp.Compile("###EndOfCaptureReached###")
 
 	for scanner.Scan() {
 		*lineBuffer += scanner.Text() + "\n"
 		matches := pcapCompileError.FindAllStringSubmatch(*lineBuffer, -1)
 		if matches != nil {
 			for _, match := range matches {
-				return (fmt.Errorf("Command line error: %s", match[0][1:]))
+				return (fmt.Errorf("command line error: %s", match[0][1:]))
 			}
+		}
+		matches = pcapCompileEndOfCapture.FindAllStringSubmatch(*lineBuffer, -1)
+		if matches != nil {
+			break
 		}
 
 		debuglog(logLevelDebug, "Reading command: %s", *lineBuffer)
@@ -482,20 +491,14 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File)
 
 	debuglog(logLevelError, "Capture ended")
 
-	debuglog(logLevelError, *lineBuffer)
-
 	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	if err := sshShellSession.session.Wait(); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func startCaptureSession(filename *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string) error {
+func startCaptureSession(filename *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
 
 	pcap_file, _ := createPcapFile(*filename)
 
@@ -510,7 +513,7 @@ func startCaptureSession(filename *string, username *string, password *string, h
 
 	result := ""
 
-	sniffCommand := fmt.Sprintf(`diagnose sniffer packet %s "%s" 6`, *captureInterface, *captureFilter)
+	sniffCommand := fmt.Sprintf(`diagnose sniffer packet %s "%s" 6 %d`, *captureInterface, *captureFilter, *packetlimit)
 
 	if vdomCheckEnabled {
 
