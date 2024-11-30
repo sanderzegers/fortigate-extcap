@@ -20,12 +20,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 type networkPacket struct {
@@ -62,6 +65,7 @@ var currentLogLevel = logLevelError
 var captureStartTimestamp int64 //Timestamp when packet capture was launched
 var debugLogEnabled = false
 var vdomCheckEnabled = false
+var sshKnownHostsfile string
 
 // Store debug messages in log file, if debugLogEnabled is set to true
 func debuglog(level int, format string, args ...interface{}) {
@@ -217,6 +221,7 @@ func extcap_config(iface string) {
 	fmt.Println("arg {number=8}{call=--log-file}{display=Use a file for logging}{type=fileselect}{tooltip=Set a file where log messages are written}{required=false}{group=Debug}")
 	fmt.Println("arg {number=9}{call=--vdom}{display=Multi-VDOM check}{type=boolean}{tooltip=Fortigate VDOM Support}{default=false}{required=false}{group=Debug}")
 	fmt.Println("arg {number=10}{call=--packetlimit}{display=Packet count}{type=unsigned}{tooltip=Limit the maximum packet count. 0=unlimited}{default=1000}{required=true}{group=Debug}")
+	fmt.Println("arg {number=11}{call=--knownhosts}{display=Known Hostsfile}{type=fileselect}{tooltip=Path to knownhosts file}{required=true}{default=" + sshKnownHostsfile + "}{group=Debug}")
 
 }
 
@@ -229,6 +234,15 @@ func extcap_interfaces() {
 }
 
 func main() {
+
+	homeDir, err := os.UserHomeDir()
+
+	if err != nil {
+		debuglog(logLevelError, "WARNING: Unable to determine user home directory: %v. Falling back to temp directory.", err)
+		homeDir = os.TempDir()
+	}
+
+	sshKnownHostsfile = filepath.Join(homeDir, ".ssh", "known_hosts")
 
 	// Default extcap parameters
 	extcapCapture := flag.Bool("capture", false, "Start the capture")
@@ -252,8 +266,11 @@ func main() {
 	extcapLogFile := flag.String("log-file", "", "Log filename")
 	extcapVdomCheck := flag.String("vdom", "false", "Enable VDOM check, and enter management VDOM")
 	extcapPacketLimit := flag.Int("packetlimit", 1000, "Limit packet capture count")
+	extcapKnownHostsFile := flag.String("knownhosts", sshKnownHostsfile, "Path of ssh known_hosts file")
 
 	flag.Parse()
+
+	sshKnownHostsfile = *extcapKnownHostsFile
 
 	currentLogLevel = *extcapLogLevel
 	if *extcapVdomCheck == "true" {
@@ -344,7 +361,52 @@ func main() {
 
 }
 
+func errCallBack(e error) {
+	debuglog(logLevelDebug, "errCallBack")
+	if e != nil {
+		log.Fatal(e)
+	}
+}
+
+func checkKnownHosts() ssh.HostKeyCallback {
+	createKnownHosts()
+
+	kh, e := knownhosts.New(sshKnownHostsfile)
+	errCallBack(e)
+	return kh
+}
+
+func createKnownHosts() {
+
+	f, fErr := os.OpenFile((sshKnownHostsfile), os.O_CREATE, 0600)
+	if fErr != nil {
+		log.Fatal(fErr)
+	}
+	f.Close()
+}
+
+func addHostKey(host string, remote net.Addr, pubKey ssh.PublicKey) error {
+	// add host key if host is not found in known_hosts, error object is return, if nil then connection proceeds,
+	// if not nil then connection stops.
+
+	khFilePath := filepath.Join(sshKnownHostsfile)
+
+	f, fErr := os.OpenFile(khFilePath, os.O_APPEND|os.O_WRONLY, 0600)
+	if fErr != nil {
+		return fErr
+	}
+	defer f.Close()
+
+	knownHosts := knownhosts.Normalize(remote.String())
+	_, fileErr := f.WriteString(knownhosts.Line([]string{knownHosts}, pubKey))
+	return fileErr
+}
+
 func newSSHSession(username *string, password *string, hostname *string, port *int) (*sshShell, error) {
+	var (
+		keyErr *knownhosts.KeyError
+	)
+
 	debuglog(logLevelDebug, "newSSHSession()")
 
 	sshShellSession := sshShell{}
@@ -354,7 +416,21 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 		Auth: []ssh.AuthMethod{
 			ssh.Password(*password),
 		},
-		HostKeyCallback:   ssh.InsecureIgnoreHostKey(), // Note: Do not use this in production!
+		HostKeyCallback: ssh.HostKeyCallback(func(host string, remote net.Addr, pubKey ssh.PublicKey) error {
+			kh := checkKnownHosts()
+			hErr := kh(host, remote, pubKey)
+
+			if errors.As(hErr, &keyErr) && len(keyErr.Want) > 0 {
+
+				log.Printf("WARNING: not a key of %s, either a MiTM attack or %s has reconfigured the host pub key.", host, host)
+				return keyErr
+			} else if errors.As(hErr, &keyErr) && len(keyErr.Want) == 0 {
+				log.Printf("WARNING: %s is not trusted, adding key to known_hosts file.", host)
+				return addHostKey(host, remote, pubKey)
+			}
+			log.Printf("Pub key exists for %s.", host)
+			return nil
+		}),
 		HostKeyAlgorithms: []string{"ssh-ed25519", "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384"},
 	}
 
@@ -452,7 +528,7 @@ func runSingleCommand(sshShellSession *sshShell, cmd string) (string, error) {
 	return *lineBuffer, nil
 }
 
-// Run sniffer command, wo don't expect to return from here unless there's an error
+// Run sniffer command, wo don't expect to return from here unless packet count reached
 func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File) error {
 
 	debuglog(logLevelDebug, "runSnifferCommand()")
