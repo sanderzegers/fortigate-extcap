@@ -177,11 +177,9 @@ func extractSinglePacket(input_data *string) (*networkPacket, error) {
 				case i == 5:
 					packetData := ""
 					submatch := packetDataRegex.FindAllStringSubmatch(group, -1)
-					if submatch != nil {
-						for _, matchie := range submatch {
-							for _, groupie := range matchie[1:] {
-								packetData = packetData + groupie
-							}
+					for _, matchie := range submatch {
+						for _, groupie := range matchie[1:] {
+							packetData = packetData + groupie
 						}
 					}
 					debuglog(logLevelDebug, "packetData: %s\n", packetData)
@@ -199,13 +197,14 @@ func extractSinglePacket(input_data *string) (*networkPacket, error) {
 	return nil, errors.New("no packet found")
 }
 
-func extcap_config(iface string) {
+func extcap_config() {
 
 	// Server Tab
 	fmt.Println("arg {number=0}{call=--host}{display=Fortigate Address}{type=string}{tooltip=The remote Fortigate. It can be both an IP address or a hostname}{required=true}{group=Server}")
 	fmt.Println("arg {number=1}{call=--port}{display=Fortigate SSH Port}{type=unsigned}{tooltip=The remote SSH host port (1-65535)}{range=1,65535}{default=22}{required=true}{group=Server}")
 	fmt.Println("arg {number=2}{call=--capture-filter}{display=Capture filter}{type=string}{tooltip=tcpdump filter}{default=not port 22}{required=true}{group=Server}")
 	fmt.Println("arg {number=3}{call=--capture-interface}{display=Interface}{type=string}{tooltip=filter by interface}{default=any}{required=true}{group=Server}")
+	fmt.Println("arg {number=10}{call=--packetlimit}{display=Packet count}{type=unsigned}{tooltip=Limit the maximum packet count. 0=unlimited}{default=1000}{required=true}{group=Server}")
 
 	// Authentication Tab
 	fmt.Println("arg {number=4}{call=--username}{display=Username}{type=string}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=true}{group=Authentication}")
@@ -220,7 +219,6 @@ func extcap_config(iface string) {
 	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelDebug) + "}{display=Debug}")
 	fmt.Println("arg {number=8}{call=--log-file}{display=Use a file for logging}{type=fileselect}{tooltip=Set a file where log messages are written}{required=false}{group=Debug}")
 	fmt.Println("arg {number=9}{call=--vdom}{display=Multi-VDOM check}{type=boolean}{tooltip=Fortigate VDOM Support}{default=false}{required=false}{group=Debug}")
-	fmt.Println("arg {number=10}{call=--packetlimit}{display=Packet count}{type=unsigned}{tooltip=Limit the maximum packet count. 0=unlimited}{default=1000}{required=true}{group=Debug}")
 	fmt.Println("arg {number=11}{call=--knownhosts}{display=Known Hostsfile}{type=fileselect}{tooltip=Path to knownhosts file}{required=true}{default=" + sshKnownHostsfile + "}{group=Debug}")
 
 }
@@ -316,7 +314,7 @@ func main() {
 	}
 
 	if *extcapConfig {
-		extcap_config("")
+		extcap_config()
 		return
 	}
 
@@ -524,7 +522,8 @@ func runSingleCommand(sshShellSession *sshShell, cmd string) (string, error) {
 	return *lineBuffer, nil
 }
 
-// Run sniffer command, wo don't expect to return from here unless packet count reached
+// Run sniffer command, wo don't expect to return from here unless packet count is hit
+
 func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File) error {
 
 	debuglog(logLevelDebug, "runSnifferCommand()")
@@ -543,10 +542,8 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File)
 	for scanner.Scan() {
 		*lineBuffer += scanner.Text() + "\n"
 		matches := pcapCompileError.FindAllStringSubmatch(*lineBuffer, -1)
-		if matches != nil {
-			for _, match := range matches {
-				return (fmt.Errorf("command line error: %s", match[0][1:]))
-			}
+		for _, match := range matches {
+			return (fmt.Errorf("command line error: %s", match[0][1:]))
 		}
 		matches = pcapCompileEndOfCapture.FindAllStringSubmatch(*lineBuffer, -1)
 		if matches != nil {
