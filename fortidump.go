@@ -20,12 +20,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 type networkPacket struct {
@@ -62,6 +65,7 @@ var currentLogLevel = logLevelError
 var captureStartTimestamp int64 //Timestamp when packet capture was launched
 var debugLogEnabled = false
 var vdomCheckEnabled = false
+var sshKnownHostsfile string
 
 // Store debug messages in log file, if debugLogEnabled is set to true
 func debuglog(level int, format string, args ...interface{}) {
@@ -200,7 +204,7 @@ func extcap_config() {
 	fmt.Println("arg {number=1}{call=--port}{display=Fortigate SSH Port}{type=unsigned}{tooltip=The remote SSH host port (1-65535)}{range=1,65535}{default=22}{required=true}{group=Server}")
 	fmt.Println("arg {number=2}{call=--capture-filter}{display=Capture filter}{type=string}{tooltip=tcpdump filter}{default=not port 22}{required=true}{group=Server}")
 	fmt.Println("arg {number=3}{call=--capture-interface}{display=Interface}{type=string}{tooltip=filter by interface}{default=any}{required=true}{group=Server}")
-	fmt.Println("arg {number=11}{call=--packetlimit}{display=Packet count}{type=unsigned}{tooltip=Limit the maximum packet count. 0=unlimited}{default=1000}{required=true}{group=Server}")
+	fmt.Println("arg {number=10}{call=--packetlimit}{display=Packet count}{type=unsigned}{tooltip=Limit the maximum packet count. 0=unlimited}{default=1000}{required=true}{group=Server}")
 
 	// Authentication Tab
 	fmt.Println("arg {number=4}{call=--username}{display=Username}{type=string}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=true}{group=Authentication}")
@@ -215,6 +219,7 @@ func extcap_config() {
 	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelDebug) + "}{display=Debug}")
 	fmt.Println("arg {number=8}{call=--log-file}{display=Use a file for logging}{type=fileselect}{tooltip=Set a file where log messages are written}{required=false}{group=Debug}")
 	fmt.Println("arg {number=9}{call=--vdom}{display=Multi-VDOM check}{type=boolean}{tooltip=Fortigate VDOM Support}{default=false}{required=false}{group=Debug}")
+	fmt.Println("arg {number=11}{call=--knownhosts}{display=Known Hostsfile}{type=fileselect}{tooltip=Path to knownhosts file}{required=true}{default=" + sshKnownHostsfile + "}{group=Debug}")
 
 }
 
@@ -227,6 +232,15 @@ func extcap_interfaces() {
 }
 
 func main() {
+
+	homeDir, err := os.UserHomeDir()
+
+	if err != nil {
+		debuglog(logLevelError, "WARNING: Unable to determine user home directory: %v. Falling back to temp directory.", err)
+		homeDir = os.TempDir()
+	}
+
+	sshKnownHostsfile = filepath.Join(homeDir, ".ssh", "known_hosts")
 
 	// Default extcap parameters
 	extcapCapture := flag.Bool("capture", false, "Start the capture")
@@ -250,10 +264,14 @@ func main() {
 	extcapLogFile := flag.String("log-file", "", "Log filename")
 	extcapVdomCheck := flag.String("vdom", "false", "Enable VDOM check, and enter management VDOM")
 	extcapPacketLimit := flag.Int("packetlimit", 1000, "Limit packet capture count")
+	extcapKnownHostsFile := flag.String("knownhosts", sshKnownHostsfile, "Path of ssh known_hosts file")
 
 	flag.Parse()
 
+	sshKnownHostsfile = *extcapKnownHostsFile
+
 	currentLogLevel = *extcapLogLevel
+
 	if *extcapVdomCheck == "true" {
 		vdomCheckEnabled = true
 	}
@@ -333,7 +351,7 @@ func main() {
 
 		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			//fmt.Fprintln(os.Stderr, err)
 			debuglog(logLevelError, "Fatal: %s", err)
 			os.Exit(errorDelay)
 		}
@@ -342,7 +360,44 @@ func main() {
 
 }
 
+func checkKnownHosts() (ssh.HostKeyCallback, error) {
+	f, err := os.OpenFile((sshKnownHostsfile), os.O_CREATE, 0600)
+	if err != nil {
+		debuglog(logLevelError, "sshKnownHostsfile failed: %s", err)
+		return nil, err
+	}
+	f.Close()
+
+	kh, err := knownhosts.New(sshKnownHostsfile)
+	if err != nil {
+		debuglog(logLevelError, "knownhosts failed: %s", err)
+		return nil, err
+	}
+	return kh, nil
+}
+
+func addHostKey(host string, remote net.Addr, pubKey ssh.PublicKey) error {
+	// add host key if host is not found in known_hosts, error object is return, if nil then connection proceeds,
+	// if not nil then connection stops.
+
+	khFilePath := filepath.Join(sshKnownHostsfile)
+
+	f, fErr := os.OpenFile(khFilePath, os.O_APPEND|os.O_WRONLY, 0600)
+	if fErr != nil {
+		return fErr
+	}
+	defer f.Close()
+
+	knownHosts := knownhosts.Normalize(remote.String())
+	_, fileErr := f.WriteString(knownhosts.Line([]string{knownHosts}, pubKey))
+	return fileErr
+}
+
 func newSSHSession(username *string, password *string, hostname *string, port *int) (*sshShell, error) {
+	var (
+		keyErr *knownhosts.KeyError
+	)
+
 	debuglog(logLevelDebug, "newSSHSession()")
 
 	sshShellSession := sshShell{}
@@ -352,7 +407,22 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 		Auth: []ssh.AuthMethod{
 			ssh.Password(*password),
 		},
-		HostKeyCallback:   ssh.InsecureIgnoreHostKey(), // Note: Do not use this in production!
+		HostKeyCallback: ssh.HostKeyCallback(func(host string, remote net.Addr, pubKey ssh.PublicKey) error {
+			kh, kHErr := checkKnownHosts()
+			hErr := kh(host, remote, pubKey)
+			if kHErr != nil {
+				return kHErr
+			} else if errors.As(hErr, &keyErr) && len(keyErr.Want) > 0 {
+				fmt.Fprintln(os.Stderr, "SSH Public key authentication failed, check known_hosts file")
+				debuglog(logLevelError, "Public key does not match known_hosts file: %s", host)
+				return keyErr
+			} else if errors.As(hErr, &keyErr) && len(keyErr.Want) == 0 {
+				debuglog(logLevelInfo, "%s is not trusted, adding key to known_hosts file.", host)
+				return addHostKey(host, remote, pubKey)
+			}
+			debuglog(logLevelInfo, "Public key found for %s in trusted hosts", host)
+			return nil
+		}),
 		HostKeyAlgorithms: []string{"ssh-ed25519", "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384"},
 	}
 
@@ -362,9 +432,9 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 	}
 
 	sshShellSession.session, err = client.NewSession()
-
 	if err != nil {
-		log.Fatal(err)
+		debuglog(logLevelError, "Session Error: %s", err)
+		return nil, err
 	}
 
 	sshShellSession.bufferIn, err = sshShellSession.session.StdinPipe()
@@ -386,12 +456,14 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 
 	err = sshShellSession.session.RequestPty("xterm", 80, 40, modes)
 	if err != nil {
-		panic(fmt.Sprintf("request for pseudo terminal failed: %s", err))
+		debuglog(logLevelError, "request for pseudo terminal failed: %s", err)
+		return nil, err
 	}
 
 	err = sshShellSession.session.Shell()
 	if err != nil {
-		panic(fmt.Sprintf("failed to start shell: %s", err))
+		debuglog(logLevelError, "failed to start shell: %s", err)
+		return nil, err
 	}
 
 	// Retrieve Shell prompt
@@ -451,6 +523,7 @@ func runSingleCommand(sshShellSession *sshShell, cmd string) (string, error) {
 }
 
 // Run sniffer command, wo don't expect to return from here unless packet count is hit
+
 func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File) error {
 
 	debuglog(logLevelDebug, "runSnifferCommand()")
@@ -480,7 +553,8 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File)
 		debuglog(logLevelDebug, "Reading command: %s", *lineBuffer)
 		if packet, err := extractSinglePacket(lineBuffer); err == nil {
 			if err := addPacketToPcapFile(pcapfile, *packet); err != nil {
-				panic(fmt.Sprintf("Packet write error: %s", err))
+				debuglog(logLevelError, "Packet write error: %s", err)
+				return err
 			}
 		}
 	}
