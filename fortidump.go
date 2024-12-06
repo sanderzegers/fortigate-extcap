@@ -6,9 +6,6 @@ package main
 // Version: 0.0.3alpha
 // License: GNU General Public License v2.0
 
-//TODO: Optimize singlecommand
-//TODO: SSH Certificate Authentication
-//TODO: SSH Host Key verification
 //TODO: pre-login-banner / post-login-banner support
 
 import (
@@ -349,7 +346,7 @@ func main() {
 			os.Exit(errorFifo)
 		}
 
-		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
+		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapSshKey, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
 		if err != nil {
 			//fmt.Fprintln(os.Stderr, err)
 			debuglog(logLevelError, "Fatal: %s", err)
@@ -393,20 +390,29 @@ func addHostKey(host string, remote net.Addr, pubKey ssh.PublicKey) error {
 	return fileErr
 }
 
-func newSSHSession(username *string, password *string, hostname *string, port *int) (*sshShell, error) {
+func newSSHSession(username *string, signer *ssh.Signer, password *string, hostname *string, port *int) (*sshShell, error) {
+
 	var (
 		keyErr *knownhosts.KeyError
 	)
 
-	debuglog(logLevelDebug, "newSSHSession()")
-
 	sshShellSession := sshShell{}
+
+	authmethod := []ssh.AuthMethod{
+		ssh.Password(*password),
+	}
+
+	if *signer != nil {
+		debuglog(logLevelDebug, "signer is not nil: %v", signer)
+		authmethod = []ssh.AuthMethod{
+			ssh.PublicKeys(*signer),
+			ssh.Password(*password),
+		}
+	}
 
 	config := &ssh.ClientConfig{
 		User: *username,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(*password),
-		},
+		Auth: authmethod,
 		HostKeyCallback: ssh.HostKeyCallback(func(host string, remote net.Addr, pubKey ssh.PublicKey) error {
 			kh, kHErr := checkKnownHosts()
 			hErr := kh(host, remote, pubKey)
@@ -426,8 +432,11 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 		HostKeyAlgorithms: []string{"ssh-ed25519", "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384"},
 	}
 
+	//TODO: Optimize Error handling
 	client, err := ssh.Dial("tcp", *hostname+":"+strconv.Itoa(*port), config)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "Authentication failed")
+		debuglog(logLevelError, "Dial error: %s", err)
 		return nil, fmt.Errorf("failed to dial: %s", err)
 	}
 
@@ -568,13 +577,38 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File)
 	return nil
 }
 
-func startCaptureSession(filename *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
+func startCaptureSession(filename *string, username *string, password *string, keyfile *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
 
 	pcap_file, _ := createPcapFile(*filename)
 
 	defer pcap_file.Close()
 
-	sshSession, err := newSSHSession(username, password, hostname, port)
+	var signer ssh.Signer
+
+	debuglog(logLevelError, "ssh.Signer: %v %T", signer, signer)
+
+	key, err := os.ReadFile(*keyfile)
+	if err != nil {
+		debuglog(logLevelError, "Unable to read keyfile: %s", err)
+	} else {
+		signer, err = ssh.ParsePrivateKey(key)
+		if err != nil {
+			if _, ok := err.(*ssh.PassphraseMissingError); ok {
+				signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(*password))
+				if err != nil {
+					debuglog(logLevelError, "Failed to parse private key with passphrase: %v", err)
+					fmt.Fprintln(os.Stderr, "Failed to parse private key with passphrase")
+					return err
+				}
+			} else {
+				debuglog(logLevelError, "Failed to parse private key, invalid openssh key format: %v", err)
+				fmt.Fprintln(os.Stderr, "Failed to parse private key, invalid openssh key format")
+				return err
+			}
+		}
+	}
+
+	sshSession, err := newSSHSession(username, &signer, password, hostname, port)
 	if err != nil {
 		return err
 	}
