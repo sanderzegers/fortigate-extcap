@@ -3,10 +3,10 @@ package main
 // Wireshark EXTCAP extension for capturing packets on a Fortigate.
 // Tested with FortiOS 7.4.6, FortiOS 7.2.10
 // Author: Sander Zegers
-// Version: 0.0.3alpha
+// Version: 0.0.3alpha2
 // License: GNU General Public License v2.0
 
-//TODO: pre-login-banner / post-login-banner support
+//TODO: Fortigate pre-login-banner / post-login-banner support
 
 import (
 	"bufio"
@@ -221,7 +221,7 @@ func extcap_config() {
 }
 
 func extcap_version() {
-	fmt.Println("extcap {version=0.0.3-alpha}{help=https://sanderzegers.github.io/fortigate-extcap/}")
+	fmt.Println("extcap {version=0.0.3-alpha2}{help=https://sanderzegers.github.io/fortigate-extcap/}")
 }
 
 func extcap_interfaces() {
@@ -266,6 +266,19 @@ func main() {
 	flag.Parse()
 
 	sshKnownHostsfile = *extcapKnownHostsFile
+
+	_, err = os.Stat(filepath.Dir(sshKnownHostsfile))
+
+	if err != nil {
+		if os.IsNotExist(err) {
+			errMkdir := os.MkdirAll(filepath.Dir(sshKnownHostsfile), 0700)
+			if errMkdir != nil {
+				fmt.Fprintln(os.Stderr, "Failed to create Knownhostfile directory")
+				debuglog(logLevelError, "Fatal: Failed to create Knownhostfile directory:  %s", err)
+				return
+			}
+		}
+	}
 
 	currentLogLevel = *extcapLogLevel
 
@@ -396,6 +409,8 @@ func newSSHSession(username *string, signer *ssh.Signer, password *string, hostn
 		keyErr *knownhosts.KeyError
 	)
 
+	debuglog(logLevelDebug, "newSSHSession()")
+
 	sshShellSession := sshShell{}
 
 	authmethod := []ssh.AuthMethod{
@@ -415,10 +430,14 @@ func newSSHSession(username *string, signer *ssh.Signer, password *string, hostn
 		Auth: authmethod,
 		HostKeyCallback: ssh.HostKeyCallback(func(host string, remote net.Addr, pubKey ssh.PublicKey) error {
 			kh, kHErr := checkKnownHosts()
-			hErr := kh(host, remote, pubKey)
+
 			if kHErr != nil {
 				return kHErr
-			} else if errors.As(hErr, &keyErr) && len(keyErr.Want) > 0 {
+			}
+
+			hErr := kh(host, remote, pubKey)
+
+			if errors.As(hErr, &keyErr) && len(keyErr.Want) > 0 {
 				fmt.Fprintln(os.Stderr, "SSH Public key authentication failed, check known_hosts file")
 				debuglog(logLevelError, "Public key does not match known_hosts file: %s", host)
 				return keyErr
@@ -435,7 +454,7 @@ func newSSHSession(username *string, signer *ssh.Signer, password *string, hostn
 	//TODO: Optimize Error handling
 	client, err := ssh.Dial("tcp", *hostname+":"+strconv.Itoa(*port), config)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Authentication failed")
+		fmt.Fprintln(os.Stderr, "Authentication failed:", err)
 		debuglog(logLevelError, "Dial error: %s", err)
 		return nil, fmt.Errorf("failed to dial: %s", err)
 	}
