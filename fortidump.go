@@ -392,14 +392,14 @@ func addHostKey(host string, remote net.Addr, pubKey ssh.PublicKey) error {
 
 	khFilePath := filepath.Join(sshKnownHostsfile)
 
-	f, fErr := os.OpenFile(khFilePath, os.O_APPEND|os.O_WRONLY, 0600)
+	f, fErr := os.OpenFile(khFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if fErr != nil {
 		return fErr
 	}
 	defer f.Close()
 
-	knownHosts := knownhosts.Normalize(remote.String())
-	_, fileErr := f.WriteString(knownhosts.Line([]string{knownHosts}, pubKey))
+	knownHostsEntry := knownhosts.Normalize(remote.String())
+	_, fileErr := f.WriteString(knownhosts.Line([]string{knownHostsEntry}, pubKey) + "\n")
 	return fileErr
 }
 
