@@ -18,6 +18,8 @@ Extcap plugins extend Wireshark’s capture capabilities by allowing it to colle
 - Fortigate VDOM Support
 - Simple installation
 
+## Limitations
+- Capture speed is limited to about 10 packets per second, so the tcpdump filter must be set accordingly.
 
 ## Installation
 
