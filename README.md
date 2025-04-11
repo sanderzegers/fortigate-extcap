@@ -4,9 +4,7 @@
 
 ## Description
 
-This Wireshark Extcap plugin enables real-time packet capture directly from Fortigate devices, streamlining network troubleshooting. It supports defining capture filters within Wireshark and allows multiple parallel capture sessions for enhanced flexibility and analysis.
-
-Extcap plugins extend Wireshark’s capture capabilities by allowing it to collect packets from external sources, such as remote devices or specialized hardware, instead of just local network interfaces. This makes it possible to capture traffic from Fortigate firewalls directly within Wireshark, without needing additional tools or manual exports.
+With this Wireshark Extcap plugin, you can capture traffic from FortiGate firewalls directly in Wireshark — no extra tools or manual exports needed.
 
 ![Wireshark Screenshot](images/wireshark-extcap.png)
 
@@ -14,9 +12,9 @@ Extcap plugins extend Wireshark’s capture capabilities by allowing it to colle
 
 - Capture & Stream packets directly from the Fortigate into Wireshark
 - SSH password or SSH key authentication
-- Run parallel capture sessions
+- Run multiple live capture sessions simultaneously
 - Fortigate VDOM Support
-- Simple installation
+- Easy installation
   
 ## Installation
 
