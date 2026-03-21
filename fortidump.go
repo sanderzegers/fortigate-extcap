@@ -3,10 +3,10 @@ package main
 // Wireshark EXTCAP extension for capturing packets on a Fortigate.
 // Tested with FortiOS 7.4.6, FortiOS 7.2.10
 // Author: Sander Zegers
-// Version: 0.0.3alpha2
+// Version: 0.0.4
 // License: GNU General Public License v2.0
 
-//TODO: Fortigate pre-login-banner / post-login-banner support
+// TODO: Fortigate pre-login-banner / post-login-banner support
 
 import (
 	"bufio"
@@ -19,10 +19,13 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -53,34 +56,31 @@ const (
 )
 
 type sshShell struct {
+	client    *ssh.Client
 	session   *ssh.Session
 	bufferIn  io.WriteCloser
 	bufferOut io.Reader
+	scanner   *bufio.Scanner // shared scanner — created once to avoid double-buffering
 }
 
 var currentLogLevel = logLevelError
-var captureStartTimestamp int64 //Timestamp when packet capture was launched
+var captureStartTimestamp int64 // Timestamp when packet capture was launched
 var debugLogEnabled = false
 var vdomCheckEnabled = false
 var sshKnownHostsfile string
 
+// buildDate is injected at compile time via -ldflags "-X main.buildDate=..."
+var buildDate = "unknown"
+
 // Store debug messages in log file, if debugLogEnabled is set to true
 func debuglog(level int, format string, args ...interface{}) {
-
-	if debugLogEnabled {
-		formattedMsg := format
-
-		if len(args) > 0 {
-			formattedMsg = fmt.Sprintf(format, args...)
-		}
-
-		if level >= currentLogLevel {
-			log.Printf("%s", formattedMsg)
-		}
+	if !debugLogEnabled || level < currentLogLevel {
+		return
 	}
+	log.Print(fmt.Sprintf(format, args...))
 }
 
-// Add sinlgle packet (struct networkPacket) to existing pcap file
+// Add single packet (struct networkPacket) to existing pcap file
 func addPacketToPcapFile(file *os.File, packet networkPacket) error {
 	// Helper to write data with LittleEndian and check for errors
 	write := func(data interface{}) error {
@@ -111,14 +111,37 @@ func addPacketToPcapFile(file *os.File, packet networkPacket) error {
 	return nil
 }
 
+// openFile opens a file or Windows named pipe for writing.
+// Named pipes (\\.\pipe\...) must be opened write-only without create/truncate
+// flags — those flags are invalid for pipes and corrupt the pipe state.
+// Regular files are created/truncated as normal.
+func openFile(filename string) (*os.File, error) {
+	if strings.HasPrefix(filename, `\\.\pipe\`) {
+		return os.OpenFile(filename, os.O_WRONLY, 0)
+	}
+	return os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+}
+
 // Create the PCAP File header
 func createPcapFile(filename string) (*os.File, error) {
-	file, err := os.Create(filename)
+	// Retry up to 10 times (10 seconds total) to handle Windows named pipes
+	// that aren't ready yet or return "All pipe instances are busy".
+	var file *os.File
+	var err error
+	for i := 0; i < 10; i++ {
+		debuglog(logLevelDebug, "createPcapFile: attempt %d", i+1)
+		file, err = openFile(filename)
+		if err == nil {
+			break
+		}
+		debuglog(logLevelDebug, "createPcapFile: attempt %d failed: %s", i+1, err)
+		time.Sleep(500 * time.Millisecond)
+	}
 	if err != nil {
 		return nil, err
 	}
 	// Pcap file header
-	file.Write([]byte{
+	if _, err = file.Write([]byte{
 		0xD4, 0xC3, 0xB2, 0xA1, //Magic number
 		0x02, 0x00, //Version Major (2)
 		0x04, 0x00, //Version Minor (4)
@@ -126,75 +149,166 @@ func createPcapFile(filename string) (*os.File, error) {
 		0x00, 0x00, 0x00, 0x00, //Time accuracy (0 unkown)
 		0xFF, 0xFF, 0x00, 0x00, //Snapshot Length (65535 Bytes)
 		0x01, 0x00, 0x00, 0x00, //Linkheader type (1 Ethernet)
-	})
-	return file, err
-}
-
-// Extracts a single block/packet from the diagnose sniffer output, containing time, interface and packedata
-func extractSinglePacket(input_data *string) (*networkPacket, error) {
-	textPacketRegex, _ := regexp.Compile(`(?ms)(\d+)\.(\d*) (.*?) (.*?) (.*?)\.*?\n(.*?)\n\n`) //Extract single packets from text output
-	packetDataRegex, _ := regexp.Compile(`(?ms)0x[0-9a-f]{4}\s*(.*?[0-9a-f]{4}.*?)\s{1,}\S*$`) //Extract packet data bytes only from the single packet
-
-	packet := networkPacket{}
-
-	/*
-	   capture group 1: packet time (secs)
-	   capture group 2: packet time (msec)
-	   capture group 3: interface
-	   capture group 4: direction (in, out, --)
-	   capture group 5: tcpdump comment
-	   capture group 6: hexdump packet bytes, offset, hex, ascii
-	*/
-
-	matches := textPacketRegex.FindAllStringSubmatch(*input_data, -1)
-
-	if matches != nil {
-		for _, match := range matches { //should never return more than 1 match
-			debuglog(logLevelInfo, "\n\n\nmatches found %d", len(matches))
-			debuglog(logLevelDebug, "\nFull match: %s", match[0])
-			for i, group := range match[1:] {
-
-				switch {
-				case i == 0:
-					debuglog(logLevelInfo, "Sec: %s\n", group)
-					temp, _ := strconv.ParseUint(group, 10, 32)
-					packet.timestampSec = uint32(temp) + uint32(captureStartTimestamp)
-				case i == 1:
-					debuglog(logLevelInfo, "Msec: %s\n", group)
-					temp, _ := strconv.ParseUint(group, 10, 32)
-					packet.timestampMsec = uint32(temp)
-				case i == 2:
-					debuglog(logLevelInfo, "Interface: %s\n", group)
-					packet.interfaceName = group
-				case i == 3:
-					debuglog(logLevelInfo, "Direction: %s\n", group)
-					packet.interfaceDirection = group
-				case i == 4:
-					//Ignore TCPDump comment
-				case i == 5:
-					packetData := ""
-					submatch := packetDataRegex.FindAllStringSubmatch(group, -1)
-					for _, matchie := range submatch {
-						for _, groupie := range matchie[1:] {
-							packetData = packetData + groupie
-						}
-					}
-					debuglog(logLevelDebug, "packetData: %s\n", packetData)
-					packetData = strings.ReplaceAll(packetData, " ", "")
-					packet.data, _ = hex.DecodeString(packetData)
-					packet.datalength = uint32(len(packet.data))
-					debuglog(logLevelInfo, "packetLength: %d\n", packet.datalength)
-				}
-
-			}
-			*input_data = strings.Replace(*input_data, match[0], "", 1) // Remove extracted packet from buffer
-		}
-		return &packet, nil
+	}); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to write pcap header: %w", err)
 	}
-	return nil, errors.New("no packet found")
+	return file, nil
 }
 
-func extcap_config() {
+// headerLineRe matches the timestamp/interface/direction header of a sniffer packet.
+// Groups: 1=secs, 2=usecs, 3=interface, 4=direction
+var headerLineRe = regexp.MustCompile(`^(\d+)\.(\d+)\s+(\S+)\s+(\S+)`)
+
+// commandPromptRe matches the blank line that FortiGate sends after command output.
+// bufio.Scanner with default ScanLines strips \r from \r\n, so a bare \r\n line → "".
+var commandPromptRe = regexp.MustCompile(`^\r?$`)
+
+// pcapErrorRe matches sniffer startup error messages returned by FortiGate.
+var pcapErrorRe = regexp.MustCompile(`^pcap_compile:|^pcap_activate:|^Command fail`)
+
+// maxLineBufferSize is the maximum size of the line buffer in runSnifferCommand.
+// If exceeded, leading content is trimmed to prevent unbounded memory growth.
+const maxLineBufferSize = 1 * 1024 * 1024 // 1 MB
+
+// isHexdumpLine returns true if line starts with a 0xNNNN offset (hexdump line).
+func isHexdumpLine(line string) bool {
+	if len(line) < 7 {
+		return false
+	}
+	if line[0] != '0' || line[1] != 'x' {
+		return false
+	}
+	for _, c := range line[2:6] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return line[6] == ' ' || line[6] == '\t'
+}
+
+// isHexGroup returns true if s is a 2- or 4-character lowercase hex string.
+// This matches exactly the byte groups in FortiGate hexdump output and stops
+// before the trailing ASCII rendering, which is never 2 or 4 all-lowercase-hex chars.
+func isHexGroup(s string) bool {
+	if len(s) != 2 && len(s) != 4 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// extractSinglePacket parses one complete packet block from the input buffer.
+// A block is: one header line (timestamp/interface/direction), zero or more
+// comment/description lines, one or more 0xNNNN hexdump lines, terminated by
+// a blank line. Lines that do not start with 0xNNNN are skipped — this safely
+// ignores CAPWAP headers, "linux cooked capture", icmp6 sum-ok, etc.
+func extractSinglePacket(inputData *string) (*networkPacket, error) {
+	lines := strings.Split(*inputData, "\n")
+
+	// Find the first header line.
+	headerIdx := -1
+	for i, line := range lines {
+		if headerLineRe.MatchString(line) {
+			headerIdx = i
+			break
+		}
+	}
+	if headerIdx < 0 {
+		return nil, errors.New("no packet found")
+	}
+
+	// Find the blank line that terminates this packet block.
+	// FortiGate sometimes inserts a blank line between the timestamp header
+	// and the hexdump section (e.g. before a "linux cooked capture" description
+	// line). Only treat a blank line as the packet terminator once at least one
+	// hexdump line has been seen — earlier blank lines are part of the format.
+	//
+	// Important: the buffer always ends with "\n" (each line is appended as
+	// line+"\n"), so strings.Split always produces a trailing "" as its last
+	// element. Exclude that artifact by searching only up to len(lines)-1.
+	endIdx := -1
+	foundHexLine := false
+	for i := headerIdx + 1; i < len(lines)-1; i++ {
+		if isHexdumpLine(lines[i]) {
+			foundHexLine = true
+		}
+		if strings.TrimSpace(lines[i]) == "" && foundHexLine {
+			endIdx = i
+			break
+		}
+	}
+	if endIdx < 0 {
+		// Block not yet complete — wait for more data.
+		return nil, errors.New("no packet found")
+	}
+
+	// Parse the header fields.
+	m := headerLineRe.FindStringSubmatch(lines[headerIdx])
+	packet := networkPacket{}
+	sec, _ := strconv.ParseUint(m[1], 10, 32)
+	usec, _ := strconv.ParseUint(m[2], 10, 32)
+	packet.timestampSec = uint32(sec) + uint32(captureStartTimestamp)
+	packet.timestampMsec = uint32(usec)
+	packet.interfaceName = m[3]
+	packet.interfaceDirection = m[4]
+
+	debuglog(logLevelDebug, "Parsing packet header: sec=%d usec=%d if=%s dir=%s",
+		sec, usec, packet.interfaceName, packet.interfaceDirection)
+
+	// Collect hex bytes from hexdump lines only.
+	// Each hexdump line: "0xNNNN   HHHH HHHH ... HHHH   ASCII"
+	// Split on whitespace: fields[0]="0xNNNN", fields[1..N]=hex groups, rest=ASCII.
+	// Stop at the first field that is not a 2- or 4-char lowercase hex group.
+	var hexData strings.Builder
+	for i := headerIdx + 1; i < endIdx; i++ {
+		line := lines[i]
+		if !isHexdumpLine(line) {
+			debuglog(logLevelDebug, "Skipping non-hexdump line: %s", line)
+			continue
+		}
+		fields := strings.Fields(line)
+		// fields[0] is the "0xNNNN" offset; hex groups start at index 1.
+		for _, field := range fields[1:] {
+			if !isHexGroup(field) {
+				break // reached the ASCII rendering section
+			}
+			hexData.WriteString(field)
+		}
+	}
+
+	// Remove the consumed block from the buffer (preserve any lines before it).
+	remaining := make([]string, 0, len(lines)-(endIdx-headerIdx+1))
+	remaining = append(remaining, lines[:headerIdx]...)
+	remaining = append(remaining, lines[endIdx+1:]...)
+	*inputData = strings.Join(remaining, "\n")
+
+	hexStr := hexData.String()
+	if hexStr == "" {
+		debuglog(logLevelInfo, "Packet block contained no hexdump lines — skipping")
+		return nil, errors.New("no hex data in packet block")
+	}
+
+	data, err := hex.DecodeString(hexStr)
+	if err != nil {
+		debuglog(logLevelInfo, "Hex decode error: %s (raw hex: %.60s)", err, hexStr)
+		return nil, fmt.Errorf("hex decode failed: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, errors.New("packet decoded to zero bytes")
+	}
+
+	packet.data = data
+	packet.datalength = uint32(len(data))
+	debuglog(logLevelDebug, "Extracted packet: %d bytes", packet.datalength)
+	return &packet, nil
+}
+
+func extcapConfig() {
 
 	// Server Tab
 	fmt.Println("arg {number=0}{call=--host}{display=Fortigate Address}{type=string}{tooltip=The remote Fortigate. It can be both an IP address or a hostname}{required=true}{group=Server}")
@@ -220,15 +334,47 @@ func extcap_config() {
 
 }
 
-func extcap_version() {
-	fmt.Println("extcap {version=0.0.3-alpha2}{help=https://sanderzegers.github.io/fortigate-extcap/}")
+func extcapVersion() {
+	fmt.Println("extcap {version=0.0.4}{help=https://sanderzegers.github.io/fortigate-extcap/}")
 }
 
-func extcap_interfaces() {
+func extcapInterfaces() {
 	fmt.Println("interface {value=fortidump}{display=Fortigate Remote Capture (SSH)}")
 }
 
+// captureFilterFlag is the flag name that Wireshark may pass as multiple
+// separate words. Referenced by both joinCaptureFilter and the debug-log
+// quoting loop so adding a new multi-word flag only needs one edit.
+const captureFilterFlag = "--capture-filter"
+
+// joinCaptureFilter preprocesses os.Args before flag.Parse() to handle the
+// case where Wireshark passes --capture-filter as multiple separate arguments
+// (e.g. ["--capture-filter", "not", "port", "22"]) instead of a single quoted
+// string. It joins all words after --capture-filter until the next flag into
+// one argument so Go's flag parser sees them as a single value.
+func joinCaptureFilter(args []string) []string {
+	result := []string{args[0]}
+	for i := 1; i < len(args); i++ {
+		if args[i] == captureFilterFlag && i+1 < len(args) {
+			result = append(result, args[i])
+			i++
+			filterParts := []string{}
+			for i < len(args) && !strings.HasPrefix(args[i], "-") {
+				filterParts = append(filterParts, args[i])
+				i++
+			}
+			result = append(result, strings.Join(filterParts, " "))
+			i-- // back up so the outer loop increment lands on the next flag
+		} else {
+			result = append(result, args[i])
+		}
+	}
+	return result
+}
+
 func main() {
+
+	os.Args = joinCaptureFilter(os.Args)
 
 	homeDir, err := os.UserHomeDir()
 
@@ -241,16 +387,16 @@ func main() {
 
 	// Default extcap parameters
 	extcapCapture := flag.Bool("capture", false, "Start the capture")
-	extcapInterfaces := flag.Bool("extcap-interfaces", false, "Provide a list of interfaces to capture from")
+	extcapInterfacesArg := flag.Bool("extcap-interfaces", false, "Provide a list of interfaces to capture from")
 	extcapInterface := flag.String("extcap-interface", "", "Provide the interface to capture from")
-	extcapVersion := flag.String("extcap-version", "", "Shows the version of this utility")
+	extcapVersionArg := flag.String("extcap-version", "", "Shows the version of this utility")
 	extcapDtls := flag.Bool("extcap-dlts", false, "Provide a list of dlts for the given interface")
-	extcapConfig := flag.Bool("extcap-config", false, "Provide a list of configurations for the given interface")
+	extcapConfigArg := flag.Bool("extcap-config", false, "Provide a list of configurations for the given interface")
 	_ = flag.String("extcap-capture-filter", "", "Used together with capture to provide a capture filter") // TODO: Find better way to integrate the wireshark filter
 	extcapFifo := flag.String("fifo", "", "Use together with capture to provide the fifo to dump data to")
 
 	// Custom extcap parameters
-	extcapHost := flag.String("host", "", "The remote SSH hots (ip or domain name)")
+	extcapHost := flag.String("host", "", "The remote SSH host (ip or domain name)")
 	extcapPort := flag.Int("port", 22, "The remote SSH port")
 	extcapUsername := flag.String("username", "", "The remote SSH Username")
 	extcapPassword := flag.String("password", "", "The remote SSH Password")
@@ -288,7 +434,7 @@ func main() {
 
 	if *extcapLogFile != "" {
 
-		logfile, err := os.OpenFile(*extcapLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		logfile, err := os.OpenFile(*extcapLogFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Failed to open log file")
 			debuglog(logLevelError, "Fatal: Failed to open log file:  %s", err)
@@ -303,28 +449,35 @@ func main() {
 
 	}
 
-	debuglog(logLevelDebug, "logLevelDebug")
-	debuglog(logLevelInfo, "logLevelInfo")
-	debuglog(logLevelWarn, "logLevelWarn")
-	debuglog(logLevelError, "logLevelError")
+	debuglog(logLevelInfo, "fortidump build date: %s", buildDate)
+	debuglog(logLevelDebug, "parsed flags: extcap-interface=%q capture=%v host=%q username=%q capture-filter=%q",
+		*extcapInterface, *extcapCapture, *extcapHost, *extcapUsername, *extcapCaptureFilter)
 
-	allArgs := strings.Join(os.Args[1:], " ")
+	args := os.Args[1:]
+	quotedArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if (args[i] == captureFilterFlag || args[i] == "--username" || args[i] == "--password") && i+1 < len(args) {
+			quotedArgs = append(quotedArgs, args[i], `"`+args[i+1]+`"`)
+			i++
+		} else {
+			quotedArgs = append(quotedArgs, args[i])
+		}
+	}
+	debuglog(logLevelDebug, strings.Join(quotedArgs, " "))
 
-	debuglog(logLevelDebug, allArgs)
-
-	if !*extcapInterfaces && *extcapInterface == "" {
+	if !*extcapInterfacesArg && *extcapInterface == "" {
 		fmt.Println("An interface must be provided or the selection must be displayed")
 		return
 	}
 
-	if *extcapInterfaces {
-		extcap_version()
-		extcap_interfaces()
+	if *extcapInterfacesArg {
+		extcapVersion()
+		extcapInterfaces()
 		return
 	}
 
-	if *extcapConfig {
-		extcap_config()
+	if *extcapConfigArg {
+		extcapConfig()
 		return
 	}
 
@@ -333,9 +486,19 @@ func main() {
 		return
 	}
 
-	if *extcapVersion != "" {
-		extcap_version()
+	if *extcapVersionArg != "" {
+		extcapVersion()
+		return
 	}
+
+	// Log OS signals so we can tell whether Wireshark killed us vs. normal exit.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-sigCh
+		debuglog(logLevelInfo, "Received signal: %s — exiting", sig)
+		os.Exit(0)
+	}()
 
 	if *extcapCapture {
 		if *extcapHost == "" {
@@ -361,7 +524,7 @@ func main() {
 
 		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapSshKey, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
 		if err != nil {
-			//fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, err)
 			debuglog(logLevelError, "Fatal: %s", err)
 			os.Exit(errorDelay)
 		}
@@ -371,7 +534,7 @@ func main() {
 }
 
 func checkKnownHosts() (ssh.HostKeyCallback, error) {
-	f, err := os.OpenFile((sshKnownHostsfile), os.O_CREATE, 0600)
+	f, err := os.OpenFile(sshKnownHostsfile, os.O_CREATE, 0600)
 	if err != nil {
 		debuglog(logLevelError, "sshKnownHostsfile failed: %s", err)
 		return nil, err
@@ -390,9 +553,7 @@ func addHostKey(host string, remote net.Addr, pubKey ssh.PublicKey) error {
 	// add host key if host is not found in known_hosts, error object is return, if nil then connection proceeds,
 	// if not nil then connection stops.
 
-	khFilePath := filepath.Join(sshKnownHostsfile)
-
-	f, fErr := os.OpenFile(khFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, fErr := os.OpenFile(sshKnownHostsfile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if fErr != nil {
 		return fErr
 	}
@@ -438,8 +599,8 @@ func newSSHSession(username *string, signer *ssh.Signer, password *string, hostn
 			hErr := kh(host, remote, pubKey)
 
 			if errors.As(hErr, &keyErr) && len(keyErr.Want) > 0 {
-				fmt.Fprintln(os.Stderr, "SSH Public key authentication failed, check known_hosts file")
-				debuglog(logLevelError, "Public key does not match known_hosts file: %s", host)
+				fmt.Fprintf(os.Stderr, "Host key mismatch for %s: the key presented by the FortiGate does not match the entry in known_hosts.\nTo fix this, remove the old entry: ssh-keygen -R %s\n", host, host)
+				debuglog(logLevelError, "Host key mismatch for %s", host)
 				return keyErr
 			} else if errors.As(hErr, &keyErr) && len(keyErr.Want) == 0 {
 				debuglog(logLevelInfo, "%s is not trusted, adding key to known_hosts file.", host)
@@ -448,17 +609,20 @@ func newSSHSession(username *string, signer *ssh.Signer, password *string, hostn
 			debuglog(logLevelInfo, "Public key found for %s in trusted hosts", host)
 			return nil
 		}),
-		HostKeyAlgorithms: []string{"ssh-ed25519", "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384"},
+		// Include ssh-rsa for compatibility with older FortiOS versions (< 7.4)
+		// that do not advertise ed25519 or ECDSA. rsa-sha2-* variants are
+		// preferred over the legacy ssh-rsa (SHA-1) when both sides support them.
+		HostKeyAlgorithms: []string{"ssh-ed25519", "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384", "rsa-sha2-256", "rsa-sha2-512", "ssh-rsa"},
+		Timeout:           15 * time.Second,
 	}
 
-	//TODO: Optimize Error handling
 	client, err := ssh.Dial("tcp", *hostname+":"+strconv.Itoa(*port), config)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Authentication failed:", err)
 		debuglog(logLevelError, "Dial error: %s", err)
-		return nil, fmt.Errorf("failed to dial: %s", err)
+		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 
+	sshShellSession.client = client
 	sshShellSession.session, err = client.NewSession()
 	if err != nil {
 		debuglog(logLevelError, "Session Error: %s", err)
@@ -494,117 +658,205 @@ func newSSHSession(username *string, signer *ssh.Signer, password *string, hostn
 		return nil, err
 	}
 
-	// Retrieve Shell prompt
+	// Create the shared scanner once here so that runSingleCommand and
+	// runSnifferCommand all read from the same bufio buffer. Creating
+	// separate readers/scanners for the same io.Reader causes each one to
+	// pre-fetch bytes that the other will never see.
+	sshShellSession.scanner = bufio.NewScanner(sshShellSession.bufferOut)
+	// Increase the per-line buffer beyond the default 64 KB to handle long
+	// banners or error messages without hitting bufio.ErrTooLong.
+	sshShellSession.scanner.Buffer(make([]byte, maxLineBufferSize), maxLineBufferSize)
 
-	sshShellSession.bufferIn.Write([]byte("\n"))
+	// Retrieve Shell prompt — if FortiGate closes the connection immediately
+	// (e.g. user has no CLI access rights) Scan() returns false with no data.
+	// Guard with a timeout so we don't hang forever on an unresponsive host.
+	const promptTimeout = 15 * time.Second
+	promptTimedOut := make(chan struct{})
+	promptTimer := time.AfterFunc(promptTimeout, func() {
+		debuglog(logLevelWarn, "newSSHSession: no shell prompt after %s, closing session", promptTimeout)
+		close(promptTimedOut)
+		sshShellSession.session.Close()
+	})
+	defer promptTimer.Stop()
 
-	lineBuffer := new(string)
-	scanner := bufio.NewScanner(sshShellSession.bufferOut)
+	// Best-effort nudge to elicit the prompt; ignore the write error since
+	// a failure here will surface immediately via scanner.Scan() returning false.
+	sshShellSession.bufferIn.Write([]byte("\n")) //nolint:errcheck
 
-	for scanner.Scan() {
-		*lineBuffer += scanner.Text() + ""
-		break
+	if !sshShellSession.scanner.Scan() {
+		select {
+		case <-promptTimedOut:
+			return nil, fmt.Errorf("timed out after %s waiting for shell prompt", promptTimeout)
+		default:
+		}
+		scanErr := sshShellSession.scanner.Err()
+		if scanErr != nil {
+			debuglog(logLevelError, "failed to read shell prompt: %s", scanErr)
+			return nil, fmt.Errorf("failed to read shell prompt: %s", scanErr)
+		}
+		return nil, fmt.Errorf("FortiGate closed the connection without a shell prompt - verify the user account has CLI access permissions")
 	}
 
-	return &sshShellSession, err
+	return &sshShellSession, nil
 
 }
 
-func endSSHSession(sshShellSession *sshShell) error {
+func endSSHSession(sshShellSession *sshShell) {
 	debuglog(logLevelDebug, "endSSHSession()")
 	sshShellSession.session.Close()
-	return nil
+	sshShellSession.client.Close()
 }
 
 func runSingleCommand(sshShellSession *sshShell, cmd string) (string, error) {
 	debuglog(logLevelDebug, "runSingleCommand()")
 
-	commandPromptRegexString := `(?ms)^\r\n$`
+	// Close the session if no response arrives within the timeout. This
+	// unblocks scanner.Scan() with EOF so the function returns rather than
+	// hanging indefinitely on a silent connection drop or stuck FortiGate.
+	const cmdTimeout = 30 * time.Second
+	timedOut := make(chan struct{})
+	timer := time.AfterFunc(cmdTimeout, func() {
+		debuglog(logLevelWarn, "runSingleCommand: no response for %s, closing session", cmdTimeout)
+		close(timedOut)
+		sshShellSession.session.Close()
+	})
+	defer timer.Stop()
 
-	commandpromptRegex, _ := regexp.Compile(commandPromptRegexString) //Extract single packets from text output
+	var lineBuffer strings.Builder
+	if _, err := sshShellSession.bufferIn.Write([]byte(cmd + "\n")); err != nil {
+		return "", fmt.Errorf("failed to send command: %w", err)
+	}
 
-	lineBuffer := new(string)
-
-	sshShellSession.bufferIn.Write([]byte(cmd + "\n"))
-
-	reader := bufio.NewReader(sshShellSession.bufferOut)
-
-	for {
-		line, err := reader.ReadString('\n')
-		*lineBuffer += line
+	for sshShellSession.scanner.Scan() {
+		line := sshShellSession.scanner.Text()
+		lineBuffer.WriteString(line + "\n")
 		debuglog(logLevelDebug, "%s", line)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			log.Fatal(err)
-		}
-		matches := commandpromptRegex.FindAllStringSubmatch(line, -1)
-		if matches != nil {
+		// FortiGate terminates command output with a blank line before the prompt.
+		// bufio.Scanner strips \r from \r\n, so the blank line arrives as "".
+		if commandPromptRe.MatchString(line) {
 			break
 		}
 	}
 
-	debuglog(logLevelError, "singleCommand() ended")
+	select {
+	case <-timedOut:
+		return "", fmt.Errorf("runSingleCommand: timed out after %s waiting for response to %q", cmdTimeout, cmd)
+	default:
+	}
+	if err := sshShellSession.scanner.Err(); err != nil {
+		return "", err
+	}
 
-	return *lineBuffer, nil
+	debuglog(logLevelDebug, "runSingleCommand() ended")
+	return lineBuffer.String(), nil
 }
 
-// Run sniffer command, wo don't expect to return from here unless packet count is hit
-
-func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File) error {
+// Run sniffer command. Returns when the packet limit is reached, the pipe is
+// closed by Wireshark, or the SSH session ends.
+func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File, packetlimit int) error {
 
 	debuglog(logLevelDebug, "runSnifferCommand()")
 
-	lineBuffer := new(string)
+	captureStartTimestamp = time.Now().Unix()
 
-	//io.ReadAll(sshShellSession.bufferOut)
-	scanner := bufio.NewScanner(sshShellSession.bufferOut)
+	// Use strings.Builder to accumulate SSH output. Appending to a plain
+	// string with += copies the entire buffer on every line (O(n²) total).
+	// Builder uses amortized O(1) appends; we materialise a string only at
+	// blank lines when a packet block may be complete.
+	var buf strings.Builder
 
-	sshShellSession.bufferIn.Write([]byte(cmd + "\n"))
-	sshShellSession.bufferIn.Write([]byte("###EndOfCaptureReached###\n"))
+	if _, err := sshShellSession.bufferIn.Write([]byte(cmd + "\n")); err != nil {
+		return fmt.Errorf("failed to send sniffer command: %w", err)
+	}
 
-	pcapCompileError, _ := regexp.Compile("(?ms)^pcap_compile:(.*)|^pcap_activate:(.*)|^Command fail(.*)")
-	pcapCompileEndOfCapture, _ := regexp.Compile("###EndOfCaptureReached###")
+	packetCount := 0
+	for sshShellSession.scanner.Scan() {
+		line := sshShellSession.scanner.Text()
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+		debuglog(logLevelDebug, "SSH: %s", line)
 
-	for scanner.Scan() {
-		*lineBuffer += scanner.Text() + "\n"
-		matches := pcapCompileError.FindAllStringSubmatch(*lineBuffer, -1)
-		for _, match := range matches {
-			return (fmt.Errorf("command line error: %s", match[0][1:]))
+		// Check for sniffer startup errors on the current line only; these
+		// appear in the first few lines before any packet data arrives.
+		if packetCount == 0 && pcapErrorRe.MatchString(line) {
+			return fmt.Errorf("command line error: %s", line)
 		}
-		matches = pcapCompileEndOfCapture.FindAllStringSubmatch(*lineBuffer, -1)
-		if matches != nil {
-			break
-		}
 
-		debuglog(logLevelDebug, "Reading command: %s", *lineBuffer)
-		if packet, err := extractSinglePacket(lineBuffer); err == nil {
-			if err := addPacketToPcapFile(pcapfile, *packet); err != nil {
-				debuglog(logLevelError, "Packet write error: %s", err)
-				return err
+		// A packet block is terminated by a blank line. Only attempt extraction
+		// at that point — calling extractSinglePacket on every line is wasteful
+		// and was the main source of repeated full-buffer scans.
+		if strings.TrimSpace(line) == "" {
+			s := buf.String()
+			if packet, err := extractSinglePacket(&s); err == nil {
+				if err := addPacketToPcapFile(pcapfile, *packet); err != nil {
+					// Pipe closed by Wireshark — send Ctrl+C to stop the FortiGate sniffer.
+					debuglog(logLevelInfo, "Pipe closed, stopping capture")
+					sshShellSession.bufferIn.Write([]byte("\x03")) //nolint:errcheck — best-effort stop signal
+					return nil
+				}
+				packetCount++
+				debuglog(logLevelInfo, "Captured packet %d", packetCount)
+				// Sync the builder back to the trimmed remainder left by extractSinglePacket.
+				buf.Reset()
+				buf.WriteString(s)
+				if packetlimit > 0 && packetCount >= packetlimit {
+					debuglog(logLevelInfo, "Packet limit %d reached, stopping capture", packetlimit)
+					sshShellSession.bufferIn.Write([]byte("\x03")) //nolint:errcheck — best-effort stop signal
+					return nil
+				}
 			}
 		}
+
+		// Guard against unbounded buffer growth from unexpected/malformed output.
+		// If we exceed the limit, preserve only from the last packet header onward;
+		// if no header is present at all, the buffer is pure junk and can be reset.
+		if buf.Len() > maxLineBufferSize {
+			s := buf.String()
+			lines := strings.Split(s, "\n")
+			lastHeader := -1
+			for i := len(lines) - 1; i >= 0; i-- {
+				if headerLineRe.MatchString(lines[i]) {
+					lastHeader = i
+					break
+				}
+			}
+			if lastHeader > 0 {
+				debuglog(logLevelWarn, "lineBuffer exceeded %d bytes, trimming %d leading lines", maxLineBufferSize, lastHeader)
+				buf.Reset()
+				buf.WriteString(strings.Join(lines[lastHeader:], "\n"))
+			} else if lastHeader < 0 {
+				debuglog(logLevelWarn, "lineBuffer exceeded %d bytes with no packet header, resetting", maxLineBufferSize)
+				buf.Reset()
+			}
+			// lastHeader == 0: header already at start, nothing to trim
+		}
 	}
 
-	debuglog(logLevelError, "Capture ended")
-
-	if err := scanner.Err(); err != nil {
-		return err
+	scanErr := sshShellSession.scanner.Err()
+	if scanErr != nil {
+		debuglog(logLevelInfo, "Capture ended with scanner error after %d packets: %s", packetCount, scanErr)
+	} else {
+		debuglog(logLevelInfo, "Capture ended (SSH EOF) after %d packets", packetCount)
 	}
 
-	return nil
+	return scanErr
 }
 
 func startCaptureSession(filename *string, username *string, password *string, keyfile *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
 
-	pcap_file, _ := createPcapFile(*filename)
+	debuglog(logLevelInfo, "startCaptureSession starting")
+	defer debuglog(logLevelInfo, "startCaptureSession exiting")
 
-	defer pcap_file.Close()
+	debuglog(logLevelInfo, "opening pcap file: %s", *filename)
+	pcapFile, err := createPcapFile(*filename)
+	if err != nil {
+		return fmt.Errorf("failed to create pcap file: %s", err)
+	}
+	debuglog(logLevelInfo, "pcap file opened successfully")
+
+	defer pcapFile.Close()
 
 	var signer ssh.Signer
-
-	debuglog(logLevelError, "ssh.Signer: %v %T", signer, signer)
 
 	key, err := os.ReadFile(*keyfile)
 	if err != nil {
@@ -627,16 +879,22 @@ func startCaptureSession(filename *string, username *string, password *string, k
 		}
 	}
 
+	debuglog(logLevelInfo, "connecting SSH to %s:%d", *hostname, *port)
 	sshSession, err := newSSHSession(username, &signer, password, hostname, port)
 	if err != nil {
 		return err
 	}
+	debuglog(logLevelInfo, "SSH connected")
 
 	defer endSSHSession(sshSession)
 
-	result := ""
-
-	sniffCommand := fmt.Sprintf(`diagnose sniffer packet %s "%s" 6 %d`, *captureInterface, *captureFilter, *packetlimit)
+	var sniffCommand string
+	if *packetlimit == 0 {
+		sniffCommand = fmt.Sprintf(`diagnose sniffer packet %s '%s' 6`, *captureInterface, *captureFilter)
+	} else {
+		sniffCommand = fmt.Sprintf(`diagnose sniffer packet %s '%s' 6 %d`, *captureInterface, *captureFilter, *packetlimit)
+	}
+	debuglog(logLevelInfo, "sniffer command: %s", sniffCommand)
 
 	if vdomCheckEnabled {
 
@@ -645,10 +903,14 @@ func startCaptureSession(filename *string, username *string, password *string, k
 			return err
 		}
 
-		vdomtext = strings.TrimSpace(strings.Split(vdomtext, ":")[1])
+		parts := strings.SplitN(vdomtext, ":", 2)
+		if len(parts) < 2 {
+			return fmt.Errorf("unexpected VDOM status output: %q", vdomtext)
+		}
+		vdomtext = strings.TrimSpace(parts[1])
 		debuglog(logLevelInfo, vdomtext)
 
-		result, err = runSingleCommand(sshSession, "config vdom")
+		result, err := runSingleCommand(sshSession, "config vdom")
 		if err != nil {
 			return err
 		}
@@ -664,12 +926,27 @@ func startCaptureSession(filename *string, username *string, password *string, k
 
 	}
 
-	err = runSnifferCommand(sshSession, sniffCommand, pcap_file)
+	// Send SSH keepalives to prevent the connection from being dropped by
+	// NAT/firewall during long or low-traffic captures.
+	keepaliveDone := make(chan struct{})
+	defer close(keepaliveDone)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sshSession.client.SendRequest("keepalive@openssh.com", true, nil)
+			case <-keepaliveDone:
+				return
+			}
+		}
+	}()
+
+	err = runSnifferCommand(sshSession, sniffCommand, pcapFile, *packetlimit)
 	if err != nil {
 		return err
 	}
-
-	debuglog(logLevelError, "here")
 
 	return nil
 }
