@@ -45,10 +45,15 @@ Click the gear icon to configure the following parameters:
 - **Packet count:** The maximum number of packets to capture.
 
 **Authentication Tab:**
-- **Username:** SSH Username (eg admin). This user must have permissions to capture on the Fortigate
-- **Password:** The user's password or optionally the password for the SSH private key
+- **Username:** SSH Username (e.g. `admin`). This user must have CLI access permissions on the FortiGate.
+- **Password:** The user's password. Also used as the passphrase if an encrypted SSH private key is provided.
+- **Path to SSH Private Key:** Optional. Path to a local SSH private key file for key-based authentication. If provided, key authentication is attempted first, with password as fallback.
 
-Once everything is configured, start the Extcap by double-clicking it.
+**Debug Tab:**
+- **Multi-VDOM check:** Enable if the FortiGate is running in multi-VDOM mode. When enabled, the plugin automatically enters the management VDOM before starting the capture.
+- **Known Hostsfile:** Path to the SSH known_hosts file. Defaults to `~/.ssh/known_hosts`. The FortiGate's host key is automatically added on first connection.
+
+Once everything is configured, start the capture by double-clicking the interface.
 
 ## Building from Source
 
@@ -63,13 +68,13 @@ apt install git golang-go
 ```bash
 git clone https://github.com/sanderzegers/fortigate-extcap.git
 cd fortigate-extcap
-go build fortidump.go
+make build
 mkdir -p $HOME/.local/lib/wireshark/extcap
-cp fortidump $HOME/.local/lib/wireshark/extcap/fortigate-extcap
+cp fortigate-extcap $HOME/.local/lib/wireshark/extcap/fortigate-extcap
 ```
 
 ## Known limitations
-- Capture speed is limited to about 10 packets per second, so the tcpdump filter must be set accordingly to limit forwarded packages.
+- Capture speed is limited by the FortiGate's `diagnose sniffer packet` command, which streams packets as a text hexdump over SSH rather than a binary protocol. Use a specific capture filter to focus on the traffic you need and avoid overloading the stream.
 - This Extcap plugin is still under development. Currently it's in an early beta stage.
 
 ## License

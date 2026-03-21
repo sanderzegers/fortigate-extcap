@@ -1,1 +1,66 @@
-# Fortigate Extcap Plugin
+# FortiGate Extcap Plugin — Help
+
+This plugin lets you capture packets directly from a FortiGate firewall into Wireshark over SSH.
+
+---
+
+## Configuration
+
+### Server Tab
+
+| Field | Description |
+|---|---|
+| **FortiGate Address** | IP address or hostname of the FortiGate |
+| **FortiGate SSH Port** | SSH port (default: 22) |
+| **Capture Filter** | Traffic filter in tcpdump syntax (e.g. `not port 22`). Use a specific filter to focus on the traffic you need. |
+| **Interface** | FortiGate interface to capture on (e.g. `port1`, `any`) |
+| **Packet count** | Maximum number of packets to capture. Set to `0` for unlimited. |
+
+### Authentication Tab
+
+| Field | Description |
+|---|---|
+| **Username** | SSH username (e.g. `admin`). Must have CLI access on the FortiGate. |
+| **Password** | SSH password, or passphrase for an encrypted private key. |
+| **Path to SSH Private Key** | Optional. Path to a local SSH private key file. Key auth is tried first, password is used as fallback. |
+
+### Debug Tab
+
+| Field | Description |
+|---|---|
+| **Multi-VDOM check** | Enable when the FortiGate runs in multi-VDOM mode. The plugin will automatically enter the management VDOM before capturing. |
+| **Log level** | Verbosity of the log output. `Error` is the default. Set to `Debug` when troubleshooting. |
+| **Log file** | Path to write log output to. No output is written unless a file is specified. |
+| **Known Hostsfile** | Path to the SSH known_hosts file (default: `~/.ssh/known_hosts`). The FortiGate's host key is added automatically on first connection. |
+
+---
+
+## Known Limitations
+
+- Capture speed is limited by the FortiGate's `diagnose sniffer packet` command, which streams packets as a text hexdump over SSH rather than a binary protocol. Use a specific capture filter to focus on the traffic you need and avoid overloading the stream.
+- Wireshark may show a warning on first connection while the host key is being added to known_hosts — this is expected.
+
+---
+
+## Troubleshooting
+
+**Wireshark shows no interface after installing**
+- Make sure the binary is placed in the correct extcap folder: *Help → About Wireshark → Folders → Personal Extcap Path*
+- On Linux/macOS, make sure the binary is executable: `chmod +x fortigate-extcap`
+
+**Authentication failed**
+- Verify the username has CLI access on the FortiGate (not just web UI access).
+- If using a private key, confirm the public key is added to the FortiGate user's authorized keys.
+
+**Host key mismatch error**
+- The FortiGate's SSH host key has changed. Remove the old entry with: `ssh-keygen -R <fortigate-address>`
+
+**Capture starts but no packets appear**
+- Your capture filter may be too restrictive, or the interface name is wrong. Try `any` as the interface and `not port 22` as the filter.
+
+---
+
+## More Information
+
+- [GitHub Repository](https://github.com/sanderzegers/fortigate-extcap)
+- [Report an Issue](https://github.com/sanderzegers/fortigate-extcap/issues)
