@@ -319,8 +319,7 @@ func extcapConfig() {
 
 	// Authentication Tab
 	fmt.Println("arg {number=4}{call=--username}{display=Username}{type=string}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=true}{group=Authentication}")
-	fmt.Println("arg {number=5}{call=--password}{display=Password}{type=password}{tooltip=The SSH password, used when other methods (SSH agent or key files) are unavailable.}{group=Authentication}")
-	fmt.Println("arg {number=6}{call=--sshkey}{display=Path to SSH Private Key}{type=fileselect}{tooltip=The path on the local filesystem of the private ssh key}{group=Authentication}")
+	fmt.Println("arg {number=5}{call=--password}{display=Password}{type=password}{tooltip=The SSH password. Leave empty when using SSH agent authentication.}{group=Authentication}")
 
 	// Debug Tab
 	fmt.Println("arg {number=7}{call=--log-level}{display=Set the log level}{type=selector}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=false}{group=Debug}")
@@ -400,7 +399,6 @@ func main() {
 	extcapPort := flag.Int("port", 22, "The remote SSH port")
 	extcapUsername := flag.String("username", "", "The remote SSH Username")
 	extcapPassword := flag.String("password", "", "The remote SSH Password")
-	extcapSshKey := flag.String("sshkey", "", "Path of ssh key used for passwordless authentication")
 	extcapCaptureFilter := flag.String("capture-filter", "none", "Diagnose sniffer packet capture filter")
 	extcapCaptureInterface := flag.String("capture-interface", "any", "Capture interface on Fortigate")
 	extcapLogLevel := flag.Int("log-level", logLevelError, "Loglevel Debug(0) - Error(3) / Default 3")
@@ -511,18 +509,13 @@ func main() {
 			debuglog(logLevelError, "Fatal: No SSH username defined")
 			os.Exit(errorArg)
 		}
-		if *extcapPassword == "" && *extcapSshKey == "" {
-			fmt.Fprintln(os.Stderr, "No SSH password or SSH Key defined")
-			debuglog(logLevelError, "Fatal: No SSH password or SSH Key defined")
-			os.Exit(errorArg)
-		}
 		if *extcapFifo == "" {
 			fmt.Fprintln(os.Stderr, "No fifo file defined")
 			debuglog(logLevelError, "Fatal: No fifo file defined")
 			os.Exit(errorFifo)
 		}
 
-		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapSshKey, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
+		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			debuglog(logLevelError, "Fatal: %s", err)
@@ -564,7 +557,7 @@ func addHostKey(host string, remote net.Addr, pubKey ssh.PublicKey) error {
 	return fileErr
 }
 
-func newSSHSession(username *string, signer *ssh.Signer, password *string, hostname *string, port *int) (*sshShell, error) {
+func newSSHSession(username *string, password *string, hostname *string, port *int) (*sshShell, error) {
 
 	var (
 		keyErr *knownhosts.KeyError
@@ -574,16 +567,22 @@ func newSSHSession(username *string, signer *ssh.Signer, password *string, hostn
 
 	sshShellSession := sshShell{}
 
-	authmethod := []ssh.AuthMethod{
-		ssh.Password(*password),
+	authmethod := []ssh.AuthMethod{}
+
+	if agentClient, cleanup, err := getAgentAuthSigners(); err != nil {
+		debuglog(logLevelInfo, "SSH agent not available: %s", err)
+	} else {
+		debuglog(logLevelInfo, "SSH agent available, adding as auth method")
+		authmethod = append(authmethod, ssh.PublicKeysCallback(agentClient.Signers))
+		defer cleanup()
 	}
 
-	if *signer != nil {
-		debuglog(logLevelDebug, "signer is not nil: %v", signer)
-		authmethod = []ssh.AuthMethod{
-			ssh.PublicKeys(*signer),
-			ssh.Password(*password),
-		}
+	if *password != "" {
+		authmethod = append(authmethod, ssh.Password(*password))
+	}
+
+	if len(authmethod) == 0 {
+		return nil, fmt.Errorf("no authentication method available: provide a password or configure an SSH agent")
 	}
 
 	config := &ssh.ClientConfig{
@@ -619,6 +618,21 @@ func newSSHSession(username *string, signer *ssh.Signer, password *string, hostn
 	client, err := ssh.Dial("tcp", *hostname+":"+strconv.Itoa(*port), config)
 	if err != nil {
 		debuglog(logLevelError, "Dial error: %s", err)
+		if strings.Contains(err.Error(), "unable to authenticate") {
+			return nil, fmt.Errorf("authentication failed: incorrect password or SSH agent has no valid key for this host")
+		}
+		if strings.Contains(err.Error(), "Too many authentication failures") {
+			return nil, fmt.Errorf("authentication failed: too many failed attempts, the host may have blocked further logins")
+		}
+		if strings.Contains(err.Error(), "i/o timeout") {
+			return nil, fmt.Errorf("connection timed out: verify the FortiGate address and SSH port are correct and reachable")
+		}
+		if strings.Contains(err.Error(), "no route to host") {
+			return nil, fmt.Errorf("no route to host: verify the FortiGate address is correct and the host is reachable")
+		}
+		if strings.Contains(err.Error(), "EOF") {
+			return nil, fmt.Errorf("connection closed unexpectedly: the FortiGate terminated the connection during handshake — a common cause is a trusted host restriction on the admin account")
+		}
 		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 
@@ -842,7 +856,7 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File,
 	return scanErr
 }
 
-func startCaptureSession(filename *string, username *string, password *string, keyfile *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
+func startCaptureSession(filename *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
 
 	debuglog(logLevelInfo, "startCaptureSession starting")
 	defer debuglog(logLevelInfo, "startCaptureSession exiting")
@@ -856,31 +870,8 @@ func startCaptureSession(filename *string, username *string, password *string, k
 
 	defer pcapFile.Close()
 
-	var signer ssh.Signer
-
-	key, err := os.ReadFile(*keyfile)
-	if err != nil {
-		debuglog(logLevelError, "Unable to read keyfile: %s", err)
-	} else {
-		signer, err = ssh.ParsePrivateKey(key)
-		if err != nil {
-			if _, ok := err.(*ssh.PassphraseMissingError); ok {
-				signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(*password))
-				if err != nil {
-					debuglog(logLevelError, "Failed to parse private key with passphrase: %v", err)
-					fmt.Fprintln(os.Stderr, "Failed to parse private key with passphrase")
-					return err
-				}
-			} else {
-				debuglog(logLevelError, "Failed to parse private key, invalid openssh key format: %v", err)
-				fmt.Fprintln(os.Stderr, "Failed to parse private key, invalid openssh key format")
-				return err
-			}
-		}
-	}
-
 	debuglog(logLevelInfo, "connecting SSH to %s:%d", *hostname, *port)
-	sshSession, err := newSSHSession(username, &signer, password, hostname, port)
+	sshSession, err := newSSHSession(username, password, hostname, port)
 	if err != nil {
 		return err
 	}

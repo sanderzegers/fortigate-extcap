@@ -21,8 +21,43 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 | Field | Description |
 |---|---|
 | **Username** | SSH username (e.g. `admin`). Must have CLI access on the FortiGate. |
-| **Password** | SSH password, or passphrase for an encrypted private key. |
-| **Path to SSH Private Key** | Optional. Path to a local SSH private key file. Key auth is tried first, password is used as fallback. |
+| **Password** | SSH password. Leave empty when using SSH agent authentication. |
+
+The plugin supports two authentication methods, tried in this order:
+
+1. **SSH agent** — if an SSH agent is running with a key loaded for the FortiGate, no password is needed. This is the recommended approach as no credentials appear on the command line.
+2. **Password** — plain SSH password entered in the field above.
+
+**Setting up SSH agent (Linux/macOS):**
+```bash
+# Optional: generate a new key pair if you don't have one yet
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+# Add your key to the agent — type your passphrase once
+ssh-add ~/.ssh/id_ed25519
+```
+Then leave the Password field empty in Wireshark.
+
+**Setting up SSH agent (Windows):**
+```powershell
+# Run once as administrator
+Set-Service ssh-agent -StartupType Automatic
+Start-Service ssh-agent
+# Optional: generate a new key pair if you don't have one yet
+ssh-keygen -t ed25519 -f C:\Users\you\.ssh\id_ed25519
+# Add your key to the agent
+ssh-add C:\Users\you\.ssh\id_ed25519
+```
+
+For SSH agent to work, the FortiGate user must have the corresponding public key configured. The public key is the `.pub` file generated alongside your private key (e.g. `~/.ssh/id_ed25519.pub` on Linux/macOS or `C:\Users\you\.ssh\id_ed25519.pub` on Windows). Copy its contents into the FortiGate config:
+```
+config system admin
+    edit admin
+        set ssh-public-key1 "ssh-rsa AAAA..."
+    next
+end
+```
+
+> **Note:** FortiGate requires a password to be set on every admin account, even when using SSH key authentication. Since this password will never be used for day-to-day access, set it to a long randomly generated string (32+ characters). Store it in a password manager.
 
 ### Debug Tab
 
@@ -44,13 +79,14 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 
 ## Troubleshooting
 
-**Wireshark shows no interface after installing**
+**Wireshark shows no Fortigate extcap Plugin after installing**
 - Make sure the binary is placed in the correct extcap folder: *Help → About Wireshark → Folders → Personal Extcap Path*
 - On Linux/macOS, make sure the binary is executable: `chmod +x fortigate-extcap`
 
 **Authentication failed**
 - Verify the username has CLI access on the FortiGate (not just web UI access).
-- If using a private key, confirm the public key is added to the FortiGate user's authorized keys.
+- If using SSH agent, confirm the agent is running (`ssh-add -l`) and the FortiGate user has the public key configured.
+- If using password, verify the password is correct.
 
 **Host key mismatch error**
 - The FortiGate's SSH host key has changed. Remove the old entry with: `ssh-keygen -R <fortigate-address>`
