@@ -30,7 +30,10 @@ The plugin supports two authentication methods, tried in this order:
 
 **Setting up SSH agent (Linux/macOS):**
 ```bash
-ssh-add ~/.ssh/id_rsa   # type your passphrase once
+# Optional: generate a new key pair if you don't have one yet
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+# Add your key to the agent — type your passphrase once
+ssh-add ~/.ssh/id_ed25519
 ```
 Then leave the Password field empty in Wireshark.
 
@@ -39,11 +42,13 @@ Then leave the Password field empty in Wireshark.
 # Run once as administrator
 Set-Service ssh-agent -StartupType Automatic
 Start-Service ssh-agent
-# Then add your key
-ssh-add C:\Users\you\.ssh\id_rsa
+# Optional: generate a new key pair if you don't have one yet
+ssh-keygen -t ed25519 -f C:\Users\you\.ssh\id_ed25519
+# Add your key to the agent
+ssh-add C:\Users\you\.ssh\id_ed25519
 ```
 
-For SSH agent to work, the FortiGate user must have the corresponding public key configured:
+For SSH agent to work, the FortiGate user must have the corresponding public key configured. The public key is the `.pub` file generated alongside your private key (e.g. `~/.ssh/id_ed25519.pub` on Linux/macOS or `C:\Users\you\.ssh\id_ed25519.pub` on Windows). Copy its contents into the FortiGate config:
 ```
 config system admin
     edit admin
@@ -51,6 +56,8 @@ config system admin
     next
 end
 ```
+
+> **Note:** FortiGate requires a password to be set on every admin account, even when using SSH key authentication. Since this password will never be used for day-to-day access, set it to a long randomly generated string (32+ characters). Store it in a password manager.
 
 ### Debug Tab
 
@@ -72,7 +79,7 @@ end
 
 ## Troubleshooting
 
-**Wireshark shows no interface after installing**
+**Wireshark shows no Fortigate extcap Plugin after installing**
 - Make sure the binary is placed in the correct extcap folder: *Help → About Wireshark → Folders → Personal Extcap Path*
 - On Linux/macOS, make sure the binary is executable: `chmod +x fortigate-extcap`
 

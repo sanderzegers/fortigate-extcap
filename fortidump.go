@@ -618,6 +618,21 @@ func newSSHSession(username *string, password *string, hostname *string, port *i
 	client, err := ssh.Dial("tcp", *hostname+":"+strconv.Itoa(*port), config)
 	if err != nil {
 		debuglog(logLevelError, "Dial error: %s", err)
+		if strings.Contains(err.Error(), "unable to authenticate") {
+			return nil, fmt.Errorf("authentication failed: incorrect password or SSH agent has no valid key for this host")
+		}
+		if strings.Contains(err.Error(), "Too many authentication failures") {
+			return nil, fmt.Errorf("authentication failed: too many failed attempts, the host may have blocked further logins")
+		}
+		if strings.Contains(err.Error(), "i/o timeout") {
+			return nil, fmt.Errorf("connection timed out: verify the FortiGate address and SSH port are correct and reachable")
+		}
+		if strings.Contains(err.Error(), "no route to host") {
+			return nil, fmt.Errorf("no route to host: verify the FortiGate address is correct and the host is reachable")
+		}
+		if strings.Contains(err.Error(), "EOF") {
+			return nil, fmt.Errorf("connection closed unexpectedly: the FortiGate terminated the connection during handshake — a common cause is a trusted host restriction on the admin account")
+		}
 		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 

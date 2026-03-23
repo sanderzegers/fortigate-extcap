@@ -77,6 +77,10 @@ mkdir -p $HOME/.local/lib/wireshark/extcap
 cp fortigate-extcap $HOME/.local/lib/wireshark/extcap/fortigate-extcap
 ```
 
+## Documentation
+
+For full configuration details, authentication setup, and troubleshooting, see the [Help Documentation](docs/index.md).
+
 ## Known limitations
 - Capture speed is limited by the FortiGate's `diagnose sniffer packet` command, which streams packets as a text hexdump over SSH rather than a binary protocol. Use a specific capture filter to focus on the traffic you need and avoid overloading the stream.
 - This Extcap plugin is still under development. Currently it's in an early beta stage.
