@@ -21,8 +21,36 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 | Field | Description |
 |---|---|
 | **Username** | SSH username (e.g. `admin`). Must have CLI access on the FortiGate. |
-| **Password** | SSH password, or passphrase for an encrypted private key. |
-| **Path to SSH Private Key** | Optional. Path to a local SSH private key file. Key auth is tried first, password is used as fallback. |
+| **Password** | SSH password. Leave empty when using SSH agent authentication. |
+
+The plugin supports two authentication methods, tried in this order:
+
+1. **SSH agent** — if an SSH agent is running with a key loaded for the FortiGate, no password is needed. This is the recommended approach as no credentials appear on the command line.
+2. **Password** — plain SSH password entered in the field above.
+
+**Setting up SSH agent (Linux/macOS):**
+```bash
+ssh-add ~/.ssh/id_rsa   # type your passphrase once
+```
+Then leave the Password field empty in Wireshark.
+
+**Setting up SSH agent (Windows):**
+```powershell
+# Run once as administrator
+Set-Service ssh-agent -StartupType Automatic
+Start-Service ssh-agent
+# Then add your key
+ssh-add C:\Users\you\.ssh\id_rsa
+```
+
+For SSH agent to work, the FortiGate user must have the corresponding public key configured:
+```
+config system admin
+    edit admin
+        set ssh-public-key1 "ssh-rsa AAAA..."
+    next
+end
+```
 
 ### Debug Tab
 
@@ -50,7 +78,8 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 
 **Authentication failed**
 - Verify the username has CLI access on the FortiGate (not just web UI access).
-- If using a private key, confirm the public key is added to the FortiGate user's authorized keys.
+- If using SSH agent, confirm the agent is running (`ssh-add -l`) and the FortiGate user has the public key configured.
+- If using password, verify the password is correct.
 
 **Host key mismatch error**
 - The FortiGate's SSH host key has changed. Remove the old entry with: `ssh-keygen -R <fortigate-address>`
