@@ -357,24 +357,24 @@ func extractSinglePacket(inputData *string) (*networkPacket, error) {
 func extcapConfig() {
 
 	// Server Tab
-	fmt.Println("arg {number=0}{call=--host}{display=Fortigate Address}{type=string}{tooltip=The remote Fortigate. It can be both an IP address or a hostname}{required=true}{group=Server}")
-	fmt.Println("arg {number=1}{call=--port}{display=Fortigate SSH Port}{type=unsigned}{tooltip=The remote SSH host port (1-65535)}{range=1,65535}{default=22}{required=true}{group=Server}")
-	fmt.Println("arg {number=2}{call=--capture-filter}{display=Capture filter}{type=string}{tooltip=tcpdump filter}{default=not port 22}{required=true}{group=Server}")
-	fmt.Println("arg {number=3}{call=--capture-interface}{display=Interface}{type=string}{tooltip=filter by interface}{default=any}{required=true}{group=Server}")
-	fmt.Println("arg {number=10}{call=--packetlimit}{display=Packet count}{type=unsigned}{tooltip=Limit the maximum packet count. 0=unlimited}{default=1000}{required=true}{group=Server}")
+	fmt.Println("arg {number=0}{call=--host}{display=Fortigate Address}{type=string}{tooltip=IP address or hostname of the FortiGate firewall}{required=true}{group=Server}")
+	fmt.Println("arg {number=1}{call=--port}{display=Fortigate SSH Port}{type=unsigned}{tooltip=SSH port used to connect to the FortiGate (default: 22)}{range=1,65535}{default=22}{required=true}{group=Server}")
+	fmt.Println("arg {number=2}{call=--capture-filter}{display=Capture Filter}{type=string}{tooltip=Capture filter in tcpdump syntax. Leave empty to capture all traffic. The SSH management session is excluded automatically. Example: not port 443}{required=false}{group=Server}")
+	fmt.Println("arg {number=3}{call=--capture-interface}{display=Interface}{type=string}{tooltip=FortiGate interface to capture on (e.g. port1, any). Use any to capture on all interfaces.}{default=any}{required=true}{group=Server}")
+	fmt.Println("arg {number=10}{call=--packetlimit}{display=Packet count}{type=unsigned}{tooltip=Maximum number of packets to capture. Set to 0 for unlimited.}{default=1000}{required=true}{group=Server}")
 
 	// Authentication Tab
 	fmt.Println("arg {number=4}{call=--username}{display=Username}{type=string}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=true}{group=Authentication}")
 	fmt.Println("arg {number=5}{call=--password}{display=Password}{type=password}{tooltip=The SSH password. Leave empty when using SSH agent authentication.}{group=Authentication}")
 
 	// Debug Tab
-	fmt.Println("arg {number=7}{call=--log-level}{display=Set the log level}{type=selector}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=false}{group=Debug}")
+	fmt.Println("arg {number=7}{call=--log-level}{display=Log level}{type=selector}{tooltip=Verbosity of log output. Use Debug when troubleshooting.}{required=false}{group=Debug}")
 	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelError) + "}{display=Error}")
 	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelWarn) + "}{display=Warning}")
 	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelInfo) + "}{display=Info}")
 	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelDebug) + "}{display=Debug}")
-	fmt.Println("arg {number=8}{call=--log-file}{display=Use a file for logging}{type=fileselect}{tooltip=Set a file where log messages are written}{required=false}{group=Debug}")
-	fmt.Println("arg {number=11}{call=--knownhosts}{display=Known Hostsfile}{type=fileselect}{tooltip=Path to knownhosts file}{required=true}{default=" + sshKnownHostsfile + "}{group=Debug}")
+	fmt.Println("arg {number=8}{call=--log-file}{display=Log file}{type=fileselect}{tooltip=Path to write log output to. No output is written unless a file is specified.}{required=false}{group=Debug}")
+	fmt.Println("arg {number=11}{call=--knownhosts}{display=Known Hostsfile}{type=fileselect}{tooltip=Path to the SSH known_hosts file. The FortiGate host key is added automatically on first connection.}{required=false}{default=" + sshKnownHostsfile + "}{group=Debug}")
 
 }
 
@@ -444,7 +444,7 @@ func main() {
 	extcapPort := flag.Int("port", 22, "The remote SSH port")
 	extcapUsername := flag.String("username", "", "The remote SSH Username")
 	extcapPassword := flag.String("password", "", "The remote SSH Password")
-	extcapCaptureFilter := flag.String("capture-filter", "none", "Diagnose sniffer packet capture filter")
+	extcapCaptureFilter := flag.String("capture-filter", "", "Diagnose sniffer packet capture filter")
 	extcapCaptureInterface := flag.String("capture-interface", "any", "Capture interface on Fortigate")
 	extcapLogLevel := flag.Int("log-level", logLevelError, "Loglevel Debug(0) - Error(3) / Default 3")
 	extcapLogFile := flag.String("log-file", "", "Log filename")
@@ -911,10 +911,40 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File,
 	return scanErr
 }
 
+// buildEffectiveFilter returns the filter string to pass to the FortiGate sniffer.
+// It automatically prepends an exclusion for the SSH management session so that
+// the client↔FortiGate SSH traffic never appears in the capture. The user-supplied
+// filter (if any) is appended with AND.
+func buildEffectiveFilter(hostname string, port int, userFilter string) string {
+	sshExclude := fmt.Sprintf("not (host %s and port %d)", hostname, port)
+
+	// Try to resolve the local IP used to reach the FortiGate so we can build
+	// a more precise bidirectional exclusion. UDP dial never sends any packets —
+	// it only performs a routing-table lookup.
+	conn, err := net.Dial("udp", fmt.Sprintf("%s:%d", hostname, port))
+	if err == nil {
+		defer conn.Close()
+		localIP := conn.LocalAddr().(*net.UDPAddr).IP.String()
+		sshExclude = fmt.Sprintf("not (host %s and host %s and port %d)", localIP, hostname, port)
+		debuglog(logLevelInfo, "auto SSH exclusion filter: local IP resolved to %s", localIP)
+	} else {
+		debuglog(logLevelWarn, "could not resolve local IP for SSH exclusion (%v), using host-only filter", err)
+	}
+
+	userFilter = strings.TrimSpace(userFilter)
+	if userFilter == "" || userFilter == "none" {
+		return sshExclude
+	}
+	return fmt.Sprintf("%s and (%s)", sshExclude, userFilter)
+}
+
 func startCaptureSession(filename *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
 
 	debuglog(logLevelInfo, "startCaptureSession starting")
 	defer debuglog(logLevelInfo, "startCaptureSession exiting")
+
+	effectiveFilter := buildEffectiveFilter(*hostname, *port, *captureFilter)
+	debuglog(logLevelInfo, "effective capture filter: %s", effectiveFilter)
 
 	debuglog(logLevelInfo, "opening pcapng file: %s", *filename)
 	pcapFile, err := createPcapngFile(*filename)
@@ -936,9 +966,9 @@ func startCaptureSession(filename *string, username *string, password *string, h
 
 	var sniffCommand string
 	if *packetlimit == 0 {
-		sniffCommand = fmt.Sprintf(`diagnose sniffer packet %s '%s' 6`, *captureInterface, *captureFilter)
+		sniffCommand = fmt.Sprintf(`diagnose sniffer packet %s '%s' 6`, *captureInterface, effectiveFilter)
 	} else {
-		sniffCommand = fmt.Sprintf(`diagnose sniffer packet %s '%s' 6 %d`, *captureInterface, *captureFilter, *packetlimit)
+		sniffCommand = fmt.Sprintf(`diagnose sniffer packet %s '%s' 6 %d`, *captureInterface, effectiveFilter, *packetlimit)
 	}
 	debuglog(logLevelInfo, "sniffer command: %s", sniffCommand)
 

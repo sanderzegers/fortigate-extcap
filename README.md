@@ -42,7 +42,7 @@ Click the gear icon to configure the following parameters:
 **Server Tab**
 - **Fortigate Address:** IP or hostname of the target Firewall.
 - **Fortigate SSH Port:** The SSH port used to connect.
-- **Capture Filter:** Capture filter in tcpdump format. Adjust this to match the traffic you're interested in.
+- **Capture Filter:** Capture filter in tcpdump format (e.g. `not port 443`). Leave empty to capture all traffic. The SSH management session is excluded automatically.
 - **Interface:** The Fortigate interface where the capture will run.
 - **Packet count:** The maximum number of packets to capture.
 
@@ -55,6 +55,8 @@ The plugin supports two authentication methods, tried in this order:
 2. **Password** — enter the password in the field above.
 
 **Debug Tab:**
+- **Log level:** Verbosity of the log output. `Error` is the default. Set to `Debug` when troubleshooting.
+- **Log file:** Path to write log output to. No output is written unless a file is specified.
 - **Known Hostsfile:** Path to the SSH known_hosts file. Defaults to `~/.ssh/known_hosts`. The FortiGate's host key is automatically added on first connection.
 
 Once everything is configured, start the capture by double-clicking the interface.
