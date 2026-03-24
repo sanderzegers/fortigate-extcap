@@ -13,8 +13,12 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 | **FortiGate Address** | IP address or hostname of the FortiGate |
 | **FortiGate SSH Port** | SSH port (default: 22) |
 | **Capture Filter** | Traffic filter in tcpdump syntax (e.g. `not port 22`). Use a specific filter to focus on the traffic you need. |
-| **Interface** | FortiGate interface to capture on (e.g. `port1`, `any`) |
+| **Interface** | FortiGate interface to capture on (e.g. `port1`, `any`). When set to `any`, each packet in Wireshark shows which interface it arrived on. |
 | **Packet count** | Maximum number of packets to capture. Set to `0` for unlimited. |
+
+**Tip:** When capturing on `any`, Wireshark shows the FortiGate interface name for each packet (visible in the Frame details under *Interface name*). Traffic direction — inbound or outbound relative to the FortiGate — is also recorded and shown under *Frame → Direction*.
+
+> **Multi-VDOM:** The plugin automatically detects whether the FortiGate is running in multi-VDOM mode and enters the correct VDOM context before starting the capture. No manual configuration is needed.
 
 ### Authentication Tab
 
@@ -63,7 +67,6 @@ end
 
 | Field | Description |
 |---|---|
-| **Multi-VDOM check** | Enable when the FortiGate runs in multi-VDOM mode. The plugin will automatically enter the management VDOM before capturing. |
 | **Log level** | Verbosity of the log output. `Error` is the default. Set to `Debug` when troubleshooting. |
 | **Log file** | Path to write log output to. No output is written unless a file is specified. |
 | **Known Hostsfile** | Path to the SSH known_hosts file (default: `~/.ssh/known_hosts`). The FortiGate's host key is added automatically on first connection. |

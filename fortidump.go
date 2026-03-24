@@ -66,7 +66,6 @@ type sshShell struct {
 var currentLogLevel = logLevelError
 var captureStartTimestamp int64 // Timestamp when packet capture was launched
 var debugLogEnabled = false
-var vdomCheckEnabled = false
 var sshKnownHostsfile string
 
 // buildDate is injected at compile time via -ldflags "-X main.buildDate=..."
@@ -80,35 +79,92 @@ func debuglog(level int, format string, args ...interface{}) {
 	log.Print(fmt.Sprintf(format, args...))
 }
 
-// Add single packet (struct networkPacket) to existing pcap file
-func addPacketToPcapFile(file *os.File, packet networkPacket) error {
-	// Helper to write data with LittleEndian and check for errors
-	write := func(data interface{}) error {
-		return binary.Write(file, binary.LittleEndian, data)
-	}
-
-	if err := write(packet.timestampSec); err != nil {
-		return err
-	}
-
-	if err := write(packet.timestampMsec); err != nil {
-		return err
-	}
-
-	// Captured packet length
-	if err := write(packet.datalength); err != nil {
-		return err
-	}
-
-	// Original packet length
-	if err := write(packet.datalength); err != nil {
-		return err
-	}
-
-	if err := write(packet.data); err != nil {
-		return err
+// writeSectionHeaderBlock writes a PCAPng Section Header Block.
+func writeSectionHeaderBlock(file *os.File) error {
+	const blockLen uint32 = 28
+	write := func(v interface{}) error { return binary.Write(file, binary.LittleEndian, v) }
+	for _, v := range []interface{}{
+		uint32(0x0A0D0D0A), // Block Type
+		blockLen,            // Block Total Length
+		uint32(0x1A2B3C4D), // Byte-Order Magic
+		uint16(1),           // Major Version
+		uint16(0),           // Minor Version
+		int64(-1),           // Section Length (unknown)
+		blockLen,            // Block Total Length (repeated)
+	} {
+		if err := write(v); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// writeInterfaceDescriptionBlock writes a PCAPng Interface Description Block.
+// It must be written before any Enhanced Packet Blocks that reference this interface.
+func writeInterfaceDescriptionBlock(file *os.File, ifName string) error {
+	write := func(v interface{}) error { return binary.Write(file, binary.LittleEndian, v) }
+	nameBytes := []byte(ifName)
+	namePad := (4 - (len(nameBytes) % 4)) % 4
+	// Options: if_name code(2)+length(2)+value+padding + opt_endofopt(4)
+	optLen := 0
+	if len(nameBytes) > 0 {
+		optLen = 4 + len(nameBytes) + namePad + 4
+	}
+	// Block = Type(4)+TotalLen(4)+LinkType(2)+Reserved(2)+SnapLen(4)+Options+TotalLen(4)
+	blockLen := uint32(4 + 4 + 8 + optLen + 4)
+	if err := write(uint32(0x00000001)); err != nil { return err } // Block Type: IDB
+	if err := write(blockLen); err != nil { return err }
+	if err := write(uint16(1)); err != nil { return err }    // Link Type: Ethernet
+	if err := write(uint16(0)); err != nil { return err }    // Reserved
+	if err := write(uint32(65535)); err != nil { return err } // Snap Length
+	if len(nameBytes) > 0 {
+		if err := write(uint16(2)); err != nil { return err }                 // Option: if_name
+		if err := write(uint16(len(nameBytes))); err != nil { return err }    // Option Length
+		if _, err := file.Write(nameBytes); err != nil { return err }
+		if namePad > 0 {
+			if _, err := file.Write(make([]byte, namePad)); err != nil { return err }
+		}
+		if err := write(uint32(0)); err != nil { return err } // opt_endofopt
+	}
+	return write(blockLen)
+}
+
+// writeEnhancedPacketBlock writes a PCAPng Enhanced Packet Block.
+// ifID must match the index of a previously written Interface Description Block.
+func writeEnhancedPacketBlock(file *os.File, packet networkPacket, ifID int) error {
+	write := func(v interface{}) error { return binary.Write(file, binary.LittleEndian, v) }
+	// Timestamp in microseconds since epoch (PCAPng default resolution)
+	tsUs := uint64(packet.timestampSec)*1_000_000 + uint64(packet.timestampMsec)
+	dataLen := len(packet.data)
+	dataPad := (4 - (dataLen % 4)) % 4
+	// EPB Flags option bits 0-1: 00=unknown, 01=inbound, 10=outbound
+	var dirFlags uint32
+	switch strings.ToLower(packet.interfaceDirection) {
+	case "in":
+		dirFlags = 1
+	case "out":
+		dirFlags = 2
+	}
+	// Options: epb_flags code(2)+length(2)+value(4) + opt_endofopt(4) = 12 bytes
+	const optLen = 12
+	// Block = Type(4)+TotalLen(4)+IfID(4)+TsHigh(4)+TsLow(4)+CapLen(4)+OrigLen(4)+Data+Pad+Opts+TotalLen(4)
+	blockLen := uint32(4 + 4 + 4 + 4 + 4 + 4 + 4 + dataLen + dataPad + optLen + 4)
+	if err := write(uint32(0x00000006)); err != nil { return err } // Block Type: EPB
+	if err := write(blockLen); err != nil { return err }
+	if err := write(uint32(ifID)); err != nil { return err }
+	if err := write(uint32(tsUs >> 32)); err != nil { return err }         // Timestamp High
+	if err := write(uint32(tsUs & 0xFFFFFFFF)); err != nil { return err }  // Timestamp Low
+	if err := write(uint32(dataLen)); err != nil { return err }             // Captured Length
+	if err := write(uint32(dataLen)); err != nil { return err }             // Original Length
+	if _, err := file.Write(packet.data); err != nil { return err }
+	if dataPad > 0 {
+		if _, err := file.Write(make([]byte, dataPad)); err != nil { return err }
+	}
+	if err := write(uint16(2)); err != nil { return err }  // Option Code: epb_flags
+	if err := write(uint16(4)); err != nil { return err }  // Option Length
+	if err := write(dirFlags); err != nil { return err }   // Option Value
+	if err := write(uint32(0)); err != nil { return err }  // opt_endofopt
+	return write(blockLen)
 }
 
 // openFile opens a file or Windows named pipe for writing.
@@ -122,36 +178,26 @@ func openFile(filename string) (*os.File, error) {
 	return os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 }
 
-// Create the PCAP File header
-func createPcapFile(filename string) (*os.File, error) {
-	// Retry up to 10 times (10 seconds total) to handle Windows named pipes
-	// that aren't ready yet or return "All pipe instances are busy".
+// createPcapngFile opens the output file and writes a PCAPng Section Header Block.
+// Retry logic handles Windows named pipes that may not be ready immediately.
+func createPcapngFile(filename string) (*os.File, error) {
 	var file *os.File
 	var err error
 	for i := 0; i < 10; i++ {
-		debuglog(logLevelDebug, "createPcapFile: attempt %d", i+1)
+		debuglog(logLevelDebug, "createPcapngFile: attempt %d", i+1)
 		file, err = openFile(filename)
 		if err == nil {
 			break
 		}
-		debuglog(logLevelDebug, "createPcapFile: attempt %d failed: %s", i+1, err)
+		debuglog(logLevelDebug, "createPcapngFile: attempt %d failed: %s", i+1, err)
 		time.Sleep(500 * time.Millisecond)
 	}
 	if err != nil {
 		return nil, err
 	}
-	// Pcap file header
-	if _, err = file.Write([]byte{
-		0xD4, 0xC3, 0xB2, 0xA1, //Magic number
-		0x02, 0x00, //Version Major (2)
-		0x04, 0x00, //Version Minor (4)
-		0x00, 0x00, 0x00, 0x00, //Timezone (UTC)
-		0x00, 0x00, 0x00, 0x00, //Time accuracy (0 unkown)
-		0xFF, 0xFF, 0x00, 0x00, //Snapshot Length (65535 Bytes)
-		0x01, 0x00, 0x00, 0x00, //Linkheader type (1 Ethernet)
-	}); err != nil {
+	if err := writeSectionHeaderBlock(file); err != nil {
 		file.Close()
-		return nil, fmt.Errorf("failed to write pcap header: %w", err)
+		return nil, fmt.Errorf("failed to write pcapng header: %w", err)
 	}
 	return file, nil
 }
@@ -328,7 +374,6 @@ func extcapConfig() {
 	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelInfo) + "}{display=Info}")
 	fmt.Println("value {arg=7}{value=" + strconv.Itoa(logLevelDebug) + "}{display=Debug}")
 	fmt.Println("arg {number=8}{call=--log-file}{display=Use a file for logging}{type=fileselect}{tooltip=Set a file where log messages are written}{required=false}{group=Debug}")
-	fmt.Println("arg {number=9}{call=--vdom}{display=Multi-VDOM check}{type=boolean}{tooltip=Fortigate VDOM Support}{default=false}{required=false}{group=Debug}")
 	fmt.Println("arg {number=11}{call=--knownhosts}{display=Known Hostsfile}{type=fileselect}{tooltip=Path to knownhosts file}{required=true}{default=" + sshKnownHostsfile + "}{group=Debug}")
 
 }
@@ -403,7 +448,6 @@ func main() {
 	extcapCaptureInterface := flag.String("capture-interface", "any", "Capture interface on Fortigate")
 	extcapLogLevel := flag.Int("log-level", logLevelError, "Loglevel Debug(0) - Error(3) / Default 3")
 	extcapLogFile := flag.String("log-file", "", "Log filename")
-	extcapVdomCheck := flag.String("vdom", "false", "Enable VDOM check, and enter management VDOM")
 	extcapPacketLimit := flag.Int("packetlimit", 1000, "Limit packet capture count")
 	extcapKnownHostsFile := flag.String("knownhosts", sshKnownHostsfile, "Path of ssh known_hosts file")
 
@@ -425,10 +469,6 @@ func main() {
 	}
 
 	currentLogLevel = *extcapLogLevel
-
-	if *extcapVdomCheck == "true" {
-		vdomCheckEnabled = true
-	}
 
 	if *extcapLogFile != "" {
 
@@ -767,7 +807,8 @@ func runSingleCommand(sshShellSession *sshShell, cmd string) (string, error) {
 
 // Run sniffer command. Returns when the packet limit is reached, the pipe is
 // closed by Wireshark, or the SSH session ends.
-func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File, packetlimit int) error {
+// ifaceMap tracks interface name → Interface ID; new IDBs are written on first occurrence.
+func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File, packetlimit int, ifaceMap map[string]int) error {
 
 	debuglog(logLevelDebug, "runSnifferCommand()")
 
@@ -802,7 +843,21 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File,
 		if strings.TrimSpace(line) == "" {
 			s := buf.String()
 			if packet, err := extractSinglePacket(&s); err == nil {
-				if err := addPacketToPcapFile(pcapfile, *packet); err != nil {
+				ifName := packet.interfaceName
+				if ifName == "" {
+					ifName = "unknown"
+				}
+				ifID, seen := ifaceMap[ifName]
+				if !seen {
+					ifID = len(ifaceMap)
+					if err := writeInterfaceDescriptionBlock(pcapfile, ifName); err != nil {
+						debuglog(logLevelInfo, "Pipe closed writing IDB, stopping capture")
+						sshShellSession.bufferIn.Write([]byte("\x03")) //nolint:errcheck — best-effort stop signal
+						return nil
+					}
+					ifaceMap[ifName] = ifID
+				}
+				if err := writeEnhancedPacketBlock(pcapfile, *packet, ifID); err != nil {
 					// Pipe closed by Wireshark — send Ctrl+C to stop the FortiGate sniffer.
 					debuglog(logLevelInfo, "Pipe closed, stopping capture")
 					sshShellSession.bufferIn.Write([]byte("\x03")) //nolint:errcheck — best-effort stop signal
@@ -861,12 +916,12 @@ func startCaptureSession(filename *string, username *string, password *string, h
 	debuglog(logLevelInfo, "startCaptureSession starting")
 	defer debuglog(logLevelInfo, "startCaptureSession exiting")
 
-	debuglog(logLevelInfo, "opening pcap file: %s", *filename)
-	pcapFile, err := createPcapFile(*filename)
+	debuglog(logLevelInfo, "opening pcapng file: %s", *filename)
+	pcapFile, err := createPcapngFile(*filename)
 	if err != nil {
-		return fmt.Errorf("failed to create pcap file: %s", err)
+		return fmt.Errorf("failed to create pcapng file: %s", err)
 	}
-	debuglog(logLevelInfo, "pcap file opened successfully")
+	debuglog(logLevelInfo, "pcapng file opened successfully")
 
 	defer pcapFile.Close()
 
@@ -887,34 +942,46 @@ func startCaptureSession(filename *string, username *string, password *string, h
 	}
 	debuglog(logLevelInfo, "sniffer command: %s", sniffCommand)
 
-	if vdomCheckEnabled {
+	statusOut, err := runSingleCommand(sshSession, "get system status")
+	if err != nil {
+		return err
+	}
+	debuglog(logLevelDebug, "get system status output: %s", statusOut)
 
-		vdomtext, err := runSingleCommand(sshSession, "get system status | grep \"Current virtual\"")
-		if err != nil {
+	vdomActive := false
+	for _, line := range strings.Split(statusOut, "\n") {
+		if strings.Contains(line, "Virtual domain configuration:") {
+			vdomActive = !strings.Contains(line, "disable")
+			debuglog(logLevelInfo, "VDOM configuration line: %q (active: %v)", strings.TrimSpace(line), vdomActive)
+			break
+		}
+	}
+
+	if vdomActive {
+		debuglog(logLevelInfo, "Multi-VDOM mode detected, looking for current VDOM")
+		vdomName := ""
+		for _, line := range strings.Split(statusOut, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "Current virtual domain:") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					vdomName = strings.TrimSpace(parts[1])
+				}
+				break
+			}
+		}
+		if vdomName == "" {
+			return fmt.Errorf("multi-VDOM mode is enabled but could not determine current VDOM from 'get system status'")
+		}
+		debuglog(logLevelInfo, "Entering VDOM: %s", vdomName)
+		if _, err := runSingleCommand(sshSession, "config vdom"); err != nil {
 			return err
 		}
-
-		parts := strings.SplitN(vdomtext, ":", 2)
-		if len(parts) < 2 {
-			return fmt.Errorf("unexpected VDOM status output: %q", vdomtext)
-		}
-		vdomtext = strings.TrimSpace(parts[1])
-		debuglog(logLevelInfo, vdomtext)
-
-		result, err := runSingleCommand(sshSession, "config vdom")
-		if err != nil {
+		if _, err := runSingleCommand(sshSession, fmt.Sprintf("edit %s", vdomName)); err != nil {
 			return err
 		}
-
-		debuglog(logLevelInfo, result)
-
-		result, err = runSingleCommand(sshSession, fmt.Sprintf("edit %s", vdomtext))
-		if err != nil {
-			return err
-		}
-
-		debuglog(logLevelInfo, result)
-
+		debuglog(logLevelInfo, "Entered VDOM %s successfully", vdomName)
+	} else {
+		debuglog(logLevelInfo, "Single-VDOM mode detected, skipping VDOM entry")
 	}
 
 	// Send SSH keepalives to prevent the connection from being dropped by
@@ -934,7 +1001,8 @@ func startCaptureSession(filename *string, username *string, password *string, h
 		}
 	}()
 
-	err = runSnifferCommand(sshSession, sniffCommand, pcapFile, *packetlimit)
+	ifaceMap := map[string]int{}
+	err = runSnifferCommand(sshSession, sniffCommand, pcapFile, *packetlimit, ifaceMap)
 	if err != nil {
 		return err
 	}

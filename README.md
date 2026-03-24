@@ -11,10 +11,11 @@ With this Wireshark Extcap plugin, you can capture traffic from FortiGate firewa
 ## Features
 
 - Capture & Stream packets directly from the Fortigate into Wireshark
+- Per-packet interface name and traffic direction (inbound/outbound) visible in Wireshark
 - SSH agent authentication (no credentials on the command line)
 - SSH password authentication
 - Run multiple live capture sessions simultaneously
-- Fortigate VDOM Support
+- Automatic multi-VDOM detection and support
 - Easy installation
   
 ## Installation
@@ -54,7 +55,6 @@ The plugin supports two authentication methods, tried in this order:
 2. **Password** — enter the password in the field above.
 
 **Debug Tab:**
-- **Multi-VDOM check:** Enable if the FortiGate is running in multi-VDOM mode. When enabled, the plugin automatically enters the management VDOM before starting the capture.
 - **Known Hostsfile:** Path to the SSH known_hosts file. Defaults to `~/.ssh/known_hosts`. The FortiGate's host key is automatically added on first connection.
 
 Once everything is configured, start the capture by double-clicking the interface.
