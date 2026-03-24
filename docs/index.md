@@ -10,11 +10,11 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 |---|---|
 | **FortiGate Address** | IP address or hostname of the FortiGate |
 | **FortiGate SSH Port** | SSH port (default: 22) |
-| **Capture Filter** | Traffic filter in tcpdump syntax (e.g. `not port 443`). Leave empty to capture all traffic. The SSH management session is excluded automatically. |
+| **Capture Filter** | Capture filter in tcpdump syntax (e.g. `not port 443`). Leave empty to capture all traffic. The SSH management session is excluded automatically. |
 | **Interface** | FortiGate interface to capture on (e.g. `port1`, `any`). When set to `any`, each packet in Wireshark shows which interface it arrived on. |
 | **Packet count** | Maximum number of packets to capture. Set to `0` for unlimited. |
 
-**Tip:** When capturing on `any`, Wireshark shows the FortiGate interface name for each packet (visible in the Frame details under *Interface name*). Traffic direction — inbound or outbound relative to the FortiGate — is also recorded and shown under *Frame → Direction*.
+> **Tip:** When capturing on `any`, Wireshark shows the FortiGate interface name for each packet (visible in the Frame details under *Interface name*). Traffic direction — inbound or outbound relative to the FortiGate — is also recorded and shown under *Frame → Direction*.
 
 > **Multi-VDOM:** The plugin automatically detects whether the FortiGate is running in multi-VDOM mode and enters the correct VDOM context before starting the capture. No manual configuration is needed.
 
@@ -49,17 +49,18 @@ ssh-keygen -t ed25519 -f C:\Users\you\.ssh\id_ed25519
 # Add your key to the agent
 ssh-add C:\Users\you\.ssh\id_ed25519
 ```
+Then leave the Password field empty in Wireshark.
 
-For SSH agent to work, the FortiGate user must have the corresponding public key configured. The public key is the `.pub` file generated alongside your private key (e.g. `~/.ssh/id_ed25519.pub` on Linux/macOS or `C:\Users\you\.ssh\id_ed25519.pub` on Windows). Copy its contents into the FortiGate config:
+For SSH agent to work, the FortiGate user must have the corresponding public key configured. Copy the contents of your `.pub` file (e.g. `~/.ssh/id_ed25519.pub`) into the FortiGate config:
 ```
 config system admin
     edit admin
-        set ssh-public-key1 "ssh-rsa AAAA..."
+        set ssh-public-key1 "ssh-ed25519 AAAA..."
     next
 end
 ```
 
-> **Note:** FortiGate requires a password to be set on every admin account, even when using SSH key authentication. Since this password will never be used for day-to-day access, set it to a long randomly generated string (32+ characters). Store it in a password manager.
+> **Note:** FortiGate requires a password to be set on every admin account, even when using SSH key authentication. Since this password will never be used for day-to-day access, set it to a long randomly generated string (32+ characters) and store it in a password manager.
 
 ### Debug Tab
 
@@ -67,16 +68,15 @@ end
 |---|---|
 | **Log level** | Verbosity of the log output. `Error` is the default. Set to `Debug` when troubleshooting. |
 | **Log file** | Path to write log output to. No output is written unless a file is specified. |
-| **Known Hostsfile** | Path to the SSH known_hosts file (default: `~/.ssh/known_hosts`). The FortiGate's host key is added automatically on first connection. |
+| **Known Hostsfile** | Path to the SSH known_hosts file (default: `~/.ssh/known_hosts`). The FortiGate host key is added automatically on first connection. |
 
 ## Known Limitations
 
 - Capture speed is limited by the FortiGate's `diagnose sniffer packet` command, which streams packets as a text hexdump over SSH rather than a binary protocol. Use a specific capture filter to focus on the traffic you need and avoid overloading the stream.
-- The FortiGate host key is added to known_hosts automatically on first connection. No manual action is needed.
 
 ## Troubleshooting
 
-**Wireshark shows no Fortigate extcap Plugin after installing**
+**Wireshark shows no FortiGate extcap plugin after installing**
 - Make sure the binary is placed in the correct extcap folder: *Help → About Wireshark → Folders → Personal Extcap Path*
 - On Linux/macOS, make sure the binary is executable: `chmod +x fortigate-extcap`
 
@@ -92,7 +92,7 @@ end
 - Your capture filter may be too restrictive, or the interface name is wrong. Try `any` as the interface and leave the capture filter empty.
 
 **Packets missing from capture**
-- FortiGate's NP offloading accelerates traffic through dedicated hardware processors, bypassing the software sniffer. To capture this traffic, temporarily disable NP offloading on the relevant firewall policy:
+- FortiGate's NP offloading accelerates traffic through dedicated hardware processors, bypassing the software sniffer. To capture this traffic, temporarily disable NP offloading on the relevant firewall policy and re-enable it when done:
 ```
 config firewall policy
     edit <id>
@@ -100,7 +100,6 @@ config firewall policy
     next
 end
 ```
-Remember to re-enable it after capturing.
 
 ## More Information
 

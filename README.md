@@ -86,6 +86,11 @@ For full configuration details, authentication setup, and troubleshooting, see t
 ## Known limitations
 - Capture speed is limited by the FortiGate's `diagnose sniffer packet` command, which streams packets as a text hexdump over SSH rather than a binary protocol. Use a specific capture filter to focus on the traffic you need and avoid overloading the stream.
 
+## Windows Defender false positive
+The Windows binary may be flagged by Microsoft Defender (`Trojan:Win32/Wacatac.B!ml`). This is a known false positive affecting Go binaries that use SSH and cryptography libraries. The source code is fully open and available in this repository.
+
+To resolve this, add an exclusion in Windows Defender for the extcap folder.
+
 ## License
 
 This project is licensed under the [GNU General Public License v2.0](LICENSE).
