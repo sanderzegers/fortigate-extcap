@@ -68,6 +68,10 @@ var captureStartTimestamp int64 // Timestamp when packet capture was launched
 var debugLogEnabled = false
 var sshKnownHostsfile string
 
+// activeSession is set while a capture is running so the signal handler can
+// close the SSH connection and let runSnifferCommand exit cleanly.
+var activeSession *sshShell
+
 // buildDate is injected at compile time via -ldflags "-X main.buildDate=..."
 var buildDate = "unknown"
 
@@ -365,7 +369,7 @@ func extcapConfig() {
 
 	// Authentication Tab
 	fmt.Println("arg {number=4}{call=--username}{display=Username}{type=string}{tooltip=The remote SSH username. If not provided, the current user will be used}{required=true}{group=Authentication}")
-	fmt.Println("arg {number=5}{call=--password}{display=Password}{type=password}{tooltip=The SSH password. Leave empty when using SSH agent authentication.}{group=Authentication}")
+	fmt.Println("arg {number=5}{call=--password}{display=Password}{type=password}{tooltip=The SSH password. Leave empty when using SSH agent authentication. Note: the password is visible in the process list for the entire duration of the capture. Use SSH agent authentication to avoid this.}{group=Authentication}")
 
 	// Debug Tab
 	fmt.Println("arg {number=7}{call=--log-level}{display=Log level}{type=selector}{tooltip=Verbosity of log output. Use Debug when troubleshooting.}{required=false}{group=Debug}")
@@ -379,7 +383,7 @@ func extcapConfig() {
 }
 
 func extcapVersion() {
-	fmt.Println("extcap {version=0.0.4}{help=https://sanderzegers.github.io/fortigate-extcap/}")
+	fmt.Println("extcap {version=0.5.0}{help=https://sanderzegers.github.io/fortigate-extcap/}")
 }
 
 func extcapInterfaces() {
@@ -472,7 +476,7 @@ func main() {
 
 	if *extcapLogFile != "" {
 
-		logfile, err := os.OpenFile(*extcapLogFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+		logfile, err := os.OpenFile(*extcapLogFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Failed to open log file")
 			debuglog(logLevelError, "Fatal: Failed to open log file:  %s", err)
@@ -529,13 +533,20 @@ func main() {
 		return
 	}
 
-	// Log OS signals so we can tell whether Wireshark killed us vs. normal exit.
+	// On SIGTERM/SIGINT close the active SSH session so runSnifferCommand exits
+	// via scanner EOF and all deferred cleanup (endSSHSession etc.) runs normally.
+	// If no capture is running the goroutine simply returns and main() exits on its own.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
-		debuglog(logLevelInfo, "Received signal: %s — exiting", sig)
-		os.Exit(0)
+		debuglog(logLevelInfo, "Received signal: %s — shutting down", sig)
+		if sess := activeSession; sess != nil {
+			sess.session.Close()
+			sess.client.Close()
+		} else {
+			os.Exit(0)
+		}
 	}()
 
 	if *extcapCapture {
@@ -911,6 +922,33 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File,
 	return scanErr
 }
 
+// validInterfaceRe matches safe FortiGate interface names (e.g. port1, any, wan1, dmz).
+// Only alphanumeric characters, dots, hyphens, and underscores are allowed.
+// This prevents newlines or special characters from being injected into the CLI command.
+var validInterfaceRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// validHostnameRe matches characters that are safe to embed inside a tcpdump filter expression.
+// Valid hostnames and IP addresses (including IPv6) use only letters, digits, dots, hyphens,
+// and colons. Anything else (spaces, parentheses, quotes) would break filter syntax.
+var validHostnameRe = regexp.MustCompile(`^[a-zA-Z0-9.:_-]+$`)
+
+// validateCaptureInputs checks all user-supplied fields that are later embedded in the
+// FortiGate sniffer command or in a tcpdump filter string. It returns an error describing
+// the first invalid value it finds, so the problem is reported before any SSH connection
+// is made and no commands are sent to the FortiGate.
+func validateCaptureInputs(captureInterface, userFilter, hostname string) error {
+	if !validInterfaceRe.MatchString(captureInterface) {
+		return fmt.Errorf("invalid interface name %q: only letters, digits, '.', '-', and '_' are allowed", captureInterface)
+	}
+	if strings.ContainsRune(userFilter, '\'') {
+		return fmt.Errorf("capture filter must not contain single quotes")
+	}
+	if !validHostnameRe.MatchString(hostname) {
+		return fmt.Errorf("invalid FortiGate address %q: only letters, digits, '.', '-', '_', and ':' are allowed", hostname)
+	}
+	return nil
+}
+
 // buildEffectiveFilter returns the filter string to pass to the FortiGate sniffer.
 // It automatically prepends an exclusion for the SSH management session so that
 // the client↔FortiGate SSH traffic never appears in the capture. The user-supplied
@@ -943,6 +981,10 @@ func startCaptureSession(filename *string, username *string, password *string, h
 	debuglog(logLevelInfo, "startCaptureSession starting")
 	defer debuglog(logLevelInfo, "startCaptureSession exiting")
 
+	if err := validateCaptureInputs(*captureInterface, *captureFilter, *hostname); err != nil {
+		return err
+	}
+
 	effectiveFilter := buildEffectiveFilter(*hostname, *port, *captureFilter)
 	debuglog(logLevelInfo, "effective capture filter: %s", effectiveFilter)
 
@@ -962,7 +1004,11 @@ func startCaptureSession(filename *string, username *string, password *string, h
 	}
 	debuglog(logLevelInfo, "SSH connected")
 
-	defer endSSHSession(sshSession)
+	activeSession = sshSession
+	defer func() {
+		activeSession = nil
+		endSSHSession(sshSession)
+	}()
 
 	var sniffCommand string
 	if *packetlimit == 0 {
