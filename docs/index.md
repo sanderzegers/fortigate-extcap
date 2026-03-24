@@ -2,8 +2,6 @@
 
 This plugin lets you capture packets directly from a FortiGate firewall into Wireshark over SSH.
 
----
-
 ## Configuration
 
 ### Server Tab
@@ -71,14 +69,10 @@ end
 | **Log file** | Path to write log output to. No output is written unless a file is specified. |
 | **Known Hostsfile** | Path to the SSH known_hosts file (default: `~/.ssh/known_hosts`). The FortiGate's host key is added automatically on first connection. |
 
----
-
 ## Known Limitations
 
 - Capture speed is limited by the FortiGate's `diagnose sniffer packet` command, which streams packets as a text hexdump over SSH rather than a binary protocol. Use a specific capture filter to focus on the traffic you need and avoid overloading the stream.
 - The FortiGate host key is added to known_hosts automatically on first connection. No manual action is needed.
-
----
 
 ## Troubleshooting
 
@@ -107,8 +101,6 @@ config firewall policy
 end
 ```
 Remember to re-enable it after capturing.
-
----
 
 ## More Information
 
