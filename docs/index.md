@@ -2,8 +2,6 @@
 
 This plugin lets you capture packets directly from a FortiGate firewall into Wireshark over SSH.
 
----
-
 ## Configuration
 
 ### Server Tab
@@ -12,7 +10,7 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 |---|---|
 | **FortiGate Address** | IP address or hostname of the FortiGate |
 | **FortiGate SSH Port** | SSH port (default: 22) |
-| **Capture Filter** | Traffic filter in tcpdump syntax (e.g. `not port 22`). Use a specific filter to focus on the traffic you need. |
+| **Capture Filter** | Traffic filter in tcpdump syntax (e.g. `not port 443`). Leave empty to capture all traffic. The SSH management session is excluded automatically. |
 | **Interface** | FortiGate interface to capture on (e.g. `port1`, `any`). When set to `any`, each packet in Wireshark shows which interface it arrived on. |
 | **Packet count** | Maximum number of packets to capture. Set to `0` for unlimited. |
 
@@ -71,14 +69,10 @@ end
 | **Log file** | Path to write log output to. No output is written unless a file is specified. |
 | **Known Hostsfile** | Path to the SSH known_hosts file (default: `~/.ssh/known_hosts`). The FortiGate's host key is added automatically on first connection. |
 
----
-
 ## Known Limitations
 
 - Capture speed is limited by the FortiGate's `diagnose sniffer packet` command, which streams packets as a text hexdump over SSH rather than a binary protocol. Use a specific capture filter to focus on the traffic you need and avoid overloading the stream.
-- Wireshark may show a warning on first connection while the host key is being added to known_hosts — this is expected.
-
----
+- The FortiGate host key is added to known_hosts automatically on first connection. No manual action is needed.
 
 ## Troubleshooting
 
@@ -95,9 +89,18 @@ end
 - The FortiGate's SSH host key has changed. Remove the old entry with: `ssh-keygen -R <fortigate-address>`
 
 **Capture starts but no packets appear**
-- Your capture filter may be too restrictive, or the interface name is wrong. Try `any` as the interface and `not port 22` as the filter.
+- Your capture filter may be too restrictive, or the interface name is wrong. Try `any` as the interface and leave the capture filter empty.
 
----
+**Packets missing from capture**
+- FortiGate's NP offloading accelerates traffic through dedicated hardware processors, bypassing the software sniffer. To capture this traffic, temporarily disable NP offloading on the relevant firewall policy:
+```
+config firewall policy
+    edit <id>
+        set auto-asic-offload disable
+    next
+end
+```
+Remember to re-enable it after capturing.
 
 ## More Information
 
