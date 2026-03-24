@@ -23,7 +23,7 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 | Field | Description |
 |---|---|
 | **Username** | SSH username (e.g. `admin`). Must have CLI access on the FortiGate. |
-| **Password** | SSH password. Leave empty when using SSH agent authentication. |
+| **Password** | SSH password. Leave empty when using SSH agent authentication. When using password authentication, the password is visible in the process list for the entire duration of the capture. Use SSH agent authentication to avoid this. |
 
 The plugin supports two authentication methods, tried in this order:
 
