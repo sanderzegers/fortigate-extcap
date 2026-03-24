@@ -1,9 +1,9 @@
 package main
 
 // Wireshark EXTCAP extension for capturing packets on a Fortigate.
-// Tested with FortiOS 7.4.6, FortiOS 7.2.10
+// Tested with FortiOS 7.4.6, FortiOS 7.2.10, FortiOS 7.6.5
 // Author: Sander Zegers
-// Version: 0.0.4
+// Version: 0.5.0
 // License: GNU General Public License v2.0
 
 // TODO: Fortigate pre-login-banner / post-login-banner support
