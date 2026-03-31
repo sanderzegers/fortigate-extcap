@@ -3,7 +3,7 @@ package main
 // Wireshark EXTCAP extension for capturing packets on a Fortigate.
 // Tested with FortiOS 7.4.6, FortiOS 7.2.10, FortiOS 7.6.5
 // Author: Sander Zegers
-// Version: 0.5.0
+// Version: 0.5.1
 // License: GNU General Public License v2.0
 
 // TODO: Fortigate pre-login-banner / post-login-banner support
@@ -383,7 +383,7 @@ func extcapConfig() {
 }
 
 func extcapVersion() {
-	fmt.Println("extcap {version=0.5.0}{help=https://sanderzegers.github.io/fortigate-extcap/}")
+	fmt.Println("extcap {version=0.5.1}{help=https://sanderzegers.github.io/fortigate-extcap/}")
 }
 
 func extcapInterfaces() {
@@ -963,8 +963,9 @@ func buildEffectiveFilter(hostname string, port int, userFilter string) string {
 	if err == nil {
 		defer conn.Close()
 		localIP := conn.LocalAddr().(*net.UDPAddr).IP.String()
-		sshExclude = fmt.Sprintf("not (host %s and host %s and port %d)", localIP, hostname, port)
-		debuglog(logLevelInfo, "auto SSH exclusion filter: local IP resolved to %s", localIP)
+		remoteIP := conn.RemoteAddr().(*net.UDPAddr).IP.String()
+		sshExclude = fmt.Sprintf("not (host %s and host %s and port %d)", localIP, remoteIP, port)
+		debuglog(logLevelInfo, "auto SSH exclusion filter: local IP %s, remote IP %s", localIP, remoteIP)
 	} else {
 		debuglog(logLevelWarn, "could not resolve local IP for SSH exclusion (%v), using host-only filter", err)
 	}
@@ -1085,3 +1086,4 @@ func startCaptureSession(filename *string, username *string, password *string, h
 
 	return nil
 }
+
