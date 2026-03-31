@@ -55,6 +55,13 @@ const (
 	errorDelay     = 4
 )
 
+const (
+	extcapControlPacketCount = 0
+	extcapControlInitialized = 0
+	extcapControlSet         = 1
+	extcapControlDisable     = 5
+)
+
 type sshShell struct {
 	client    *ssh.Client
 	session   *ssh.Session
@@ -74,6 +81,104 @@ var activeSession *sshShell
 
 // buildDate is injected at compile time via -ldflags "-X main.buildDate=..."
 var buildDate = "unknown"
+
+type extcapControl struct {
+	out *os.File
+}
+
+func newExtcapControl(controlInPath, controlOutPath string) (*extcapControl, error) {
+	if controlInPath == "" && controlOutPath == "" {
+		return nil, nil
+	}
+
+	control := &extcapControl{}
+	if controlOutPath != "" {
+		out, err := os.OpenFile(controlOutPath, os.O_WRONLY, 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open extcap control output: %w", err)
+		}
+		control.out = out
+	}
+
+	if controlInPath != "" {
+		in, err := os.OpenFile(controlInPath, os.O_RDONLY, 0)
+		if err != nil {
+			control.Close()
+			return nil, fmt.Errorf("failed to open extcap control input: %w", err)
+		}
+		go control.drainInput(in)
+	}
+
+	return control, nil
+}
+
+func (control *extcapControl) Close() {
+	if control == nil || control.out == nil {
+		return
+	}
+	control.out.Close()
+	control.out = nil
+}
+
+func (control *extcapControl) drainInput(in *os.File) {
+	defer in.Close()
+
+	var header [6]byte
+	for {
+		if _, err := io.ReadFull(in, header[:]); err != nil {
+			return
+		}
+		if header[0] != 'T' {
+			return
+		}
+
+		payloadLen := int(header[1])<<16 | int(header[2])<<8 | int(header[3])
+		payloadLen -= 2
+		if payloadLen < 0 {
+			return
+		}
+		if payloadLen == 0 {
+			continue
+		}
+		if _, err := io.CopyN(io.Discard, in, int64(payloadLen)); err != nil {
+			return
+		}
+	}
+}
+
+func (control *extcapControl) write(controlNumber, command byte, payload string) {
+	if control == nil || control.out == nil {
+		return
+	}
+
+	payloadBytes := []byte(payload)
+	if len(payloadBytes) > 65533 {
+		payloadBytes = payloadBytes[:65533]
+	}
+	messageLength := len(payloadBytes) + 2
+
+	packet := make([]byte, 6+len(payloadBytes))
+	packet[0] = 'T'
+	packet[1] = byte(messageLength >> 16)
+	packet[2] = byte(messageLength >> 8)
+	packet[3] = byte(messageLength)
+	packet[4] = controlNumber
+	packet[5] = command
+	copy(packet[6:], payloadBytes)
+
+	if _, err := control.out.Write(packet); err != nil {
+		debuglog(logLevelWarn, "extcap control write failed: %s", err)
+	}
+}
+
+func (control *extcapControl) initPacketCount() {
+	control.write(extcapControlPacketCount, extcapControlSet, "0")
+	control.write(extcapControlPacketCount, extcapControlDisable, "")
+}
+
+func (control *extcapControl) setPacketCount(count int) {
+	control.write(extcapControlPacketCount, extcapControlSet, strconv.Itoa(count))
+}
 
 // Store debug messages in log file, if debugLogEnabled is set to true
 func debuglog(level int, format string, args ...interface{}) {
@@ -388,6 +493,7 @@ func extcapVersion() {
 
 func extcapInterfaces() {
 	fmt.Println("interface {value=fortidump}{display=Fortigate Remote Capture (SSH)}")
+	fmt.Println("control {number=0}{type=string}{display=Packets}{tooltip=Live packet count during capture}")
 }
 
 // captureFilterFlag is the flag name that Wireshark may pass as multiple
@@ -442,6 +548,8 @@ func main() {
 	extcapConfigArg := flag.Bool("extcap-config", false, "Provide a list of configurations for the given interface")
 	_ = flag.String("extcap-capture-filter", "", "Used together with capture to provide a capture filter") // TODO: Find better way to integrate the wireshark filter
 	extcapFifo := flag.String("fifo", "", "Use together with capture to provide the fifo to dump data to")
+	extcapControlIn := flag.String("extcap-control-in", "", "Used to receive control messages from Wireshark")
+	extcapControlOut := flag.String("extcap-control-out", "", "Used to send control messages to Wireshark")
 
 	// Custom extcap parameters
 	extcapHost := flag.String("host", "", "The remote SSH host (ip or domain name)")
@@ -566,7 +674,7 @@ func main() {
 			os.Exit(errorFifo)
 		}
 
-		err := startCaptureSession(extcapFifo, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
+		err := startCaptureSession(extcapFifo, extcapControlIn, extcapControlOut, extcapUsername, extcapPassword, extcapHost, extcapPort, extcapCaptureInterface, extcapCaptureFilter, extcapPacketLimit)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			debuglog(logLevelError, "Fatal: %s", err)
@@ -819,7 +927,7 @@ func runSingleCommand(sshShellSession *sshShell, cmd string) (string, error) {
 // Run sniffer command. Returns when the packet limit is reached, the pipe is
 // closed by Wireshark, or the SSH session ends.
 // ifaceMap tracks interface name → Interface ID; new IDBs are written on first occurrence.
-func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File, packetlimit int, ifaceMap map[string]int) error {
+func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File, control *extcapControl, packetlimit int, ifaceMap map[string]int) error {
 
 	debuglog(logLevelDebug, "runSnifferCommand()")
 
@@ -875,6 +983,7 @@ func runSnifferCommand(sshShellSession *sshShell, cmd string, pcapfile *os.File,
 					return nil
 				}
 				packetCount++
+				control.setPacketCount(packetCount)
 				debuglog(logLevelInfo, "Captured packet %d", packetCount)
 				// Sync the builder back to the trimmed remainder left by extractSinglePacket.
 				buf.Reset()
@@ -977,7 +1086,7 @@ func buildEffectiveFilter(hostname string, port int, userFilter string) string {
 	return fmt.Sprintf("%s and (%s)", sshExclude, userFilter)
 }
 
-func startCaptureSession(filename *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
+func startCaptureSession(filename *string, controlInPath *string, controlOutPath *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
 
 	debuglog(logLevelInfo, "startCaptureSession starting")
 	defer debuglog(logLevelInfo, "startCaptureSession exiting")
@@ -985,6 +1094,13 @@ func startCaptureSession(filename *string, username *string, password *string, h
 	if err := validateCaptureInputs(*captureInterface, *captureFilter, *hostname); err != nil {
 		return err
 	}
+
+	control, err := newExtcapControl(*controlInPath, *controlOutPath)
+	if err != nil {
+		return err
+	}
+	defer control.Close()
+	control.initPacketCount()
 
 	effectiveFilter := buildEffectiveFilter(*hostname, *port, *captureFilter)
 	debuglog(logLevelInfo, "effective capture filter: %s", effectiveFilter)
@@ -1079,7 +1195,7 @@ func startCaptureSession(filename *string, username *string, password *string, h
 	}()
 
 	ifaceMap := map[string]int{}
-	err = runSnifferCommand(sshSession, sniffCommand, pcapFile, *packetlimit, ifaceMap)
+	err = runSnifferCommand(sshSession, sniffCommand, pcapFile, control, *packetlimit, ifaceMap)
 	if err != nil {
 		return err
 	}

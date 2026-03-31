@@ -1,0 +1,54 @@
+name: test-artifacts
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-artifact:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            output: fortigate-extcap.exe
+          - goos: linux
+            goarch: amd64
+            output: fortigate-extcap
+          - goos: darwin
+            goarch: amd64
+            output: fortigate-extcap
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: >-
+          go build -ldflags "-X 'main.buildDate=$(date -u '+%Y-%m-%d %H:%M:%S UTC')'"
+          -o ${{ matrix.output }} .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortigate-extcap-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.event_name }}-${{ github.run_id }}-${{ github.sha }}
+          path: ${{ matrix.output }}
+          if-no-files-found: error
+          retention-days: 14
