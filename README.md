@@ -10,12 +10,13 @@ With this Wireshark Extcap plugin, you can capture traffic from FortiGate firewa
 
 ## Features
 
-- Capture & Stream packets directly from the Fortigate into Wireshark
+- Capture & stream packets directly from the FortiGate into Wireshark in PCAPng format
 - Per-packet interface name and traffic direction (inbound/outbound) visible in Wireshark
-- SSH agent authentication (no credentials on the command line)
-- SSH password authentication
+- Automatic SSH session exclusion from capture
+- SSH agent and password authentication
 - Run multiple live capture sessions simultaneously
 - Automatic multi-VDOM detection and support
+- Configurable packet count limit
 - Easy installation
   
 ## Installation
@@ -34,32 +35,11 @@ With this Wireshark Extcap plugin, you can capture traffic from FortiGate firewa
 4. Restart Wireshark
  - Restart Wireshark to load the custom Extcap extension.
 
-## Quick Start
+## Usage
 
-Once the plugin is installed, it will appear in Wireshark under the capture options as **Fortigate Remote Capture (SSH): fortidump**.
-Click the gear icon to configure the following parameters:
+Once installed, the plugin appears in Wireshark's capture options as **Fortigate Remote Capture (SSH): fortidump**. Click the gear icon to enter the FortiGate address, credentials, and capture settings, then double-click the interface to start capturing.
 
-**Server Tab**
-- **Fortigate Address:** IP or hostname of the target Firewall.
-- **Fortigate SSH Port:** The SSH port used to connect.
-- **Capture Filter:** Capture filter in tcpdump format (e.g. `not port 443`). Leave empty to capture all traffic. The SSH management session is excluded automatically.
-- **Interface:** The Fortigate interface where the capture will run.
-- **Packet count:** The maximum number of packets to capture.
-
-**Authentication Tab:**
-- **Username:** SSH Username (e.g. `admin`). This user must have CLI access permissions on the FortiGate.
-- **Password:** The user's SSH password. Leave empty when using SSH agent authentication.
-
-The plugin supports two authentication methods, tried in this order:
-1. **SSH agent** — if an SSH agent is running with a key loaded for the FortiGate, no password is needed. This is the recommended approach as it keeps credentials off the command line.
-2. **Password** — enter the password in the field above.
-
-**Debug Tab:**
-- **Log level:** Verbosity of the log output. `Error` is the default. Set to `Debug` when troubleshooting.
-- **Log file:** Path to write log output to. No output is written unless a file is specified.
-- **Known Hostsfile:** Path to the SSH known_hosts file. Defaults to `~/.ssh/known_hosts`. The FortiGate's host key is automatically added on first connection.
-
-Once everything is configured, start the capture by double-clicking the interface.
+For detailed configuration, authentication setup, and troubleshooting, see the [Help Documentation](docs/index.md).
 
 ## Building from Source
 
@@ -79,12 +59,9 @@ mkdir -p $HOME/.local/lib/wireshark/extcap
 cp fortigate-extcap $HOME/.local/lib/wireshark/extcap/fortigate-extcap
 ```
 
-## Documentation
-
-For full configuration details, authentication setup, and troubleshooting, see the [Help Documentation](docs/index.md).
-
 ## Known limitations
-- Capture speed is limited by the FortiGate's `diagnose sniffer packet` command, which streams packets as a text hexdump over SSH rather than a binary protocol. Use a specific capture filter to focus on the traffic you need and avoid overloading the stream.
+
+- Capture speed is limited by the FortiGate's text-based hexdump output over SSH. See [Help Documentation](docs/index.md#known-limitations) for details.
 
 ## Windows Defender false positive
 The Windows binary may be flagged by Microsoft Defender (`Trojan:Win32/Wacatac.B!ml`). This is a known false positive affecting Go binaries that use SSH and cryptography libraries. The source code is fully open and available in this repository.
