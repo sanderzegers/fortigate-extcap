@@ -543,6 +543,7 @@ func main() {
 		interfaces, err := fetchFortiGateInterfaces(extcapHost, extcapPort, extcapUsername, extcapPassword)
 		if err != nil {
 			debuglog(logLevelWarn, "fetchFortiGateInterfaces failed: %s", err)
+			fmt.Fprintf(os.Stderr, "Failed to fetch interfaces: %s\n", err)
 			fmt.Println(`value {arg=3}{value=any}{display=any}{default=true}`)
 		} else {
 			for i, iface := range interfaces {
@@ -1050,12 +1051,36 @@ func enterVdomIfNeeded(sshSession *sshShell, statusOut string) error {
 // "any" is always prepended as the first entry.
 func fetchFortiGateInterfaces(hostname *string, port *int, username *string, password *string) ([]string, error) {
 	if *hostname == "" || *username == "" {
-		return nil, fmt.Errorf("host and username are required to fetch interfaces")
+		return nil, fmt.Errorf("fill in the FortiGate address and username, then click reload")
 	}
 
+	// Overall timeout for the entire fetch operation. The individual SSH
+	// connection and command timeouts are shorter, but this guards against
+	// the total time exceeding what is reasonable for a UI reload action.
+	type result struct {
+		ifaces []string
+		err    error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		ifaces, err := doFetchInterfaces(hostname, port, username, password)
+		ch <- result{ifaces, err}
+	}()
+
+	const fetchTimeout = 15 * time.Second
+	select {
+	case r := <-ch:
+		return r.ifaces, r.err
+	case <-time.After(fetchTimeout):
+		return nil, fmt.Errorf("timed out after %s — verify the FortiGate address (%s:%d) is reachable", fetchTimeout, *hostname, *port)
+	}
+}
+
+// doFetchInterfaces performs the actual SSH connection and interface query.
+func doFetchInterfaces(hostname *string, port *int, username *string, password *string) ([]string, error) {
 	sess, err := newSSHSession(username, password, hostname, port)
 	if err != nil {
-		return nil, fmt.Errorf("SSH connection failed: %w", err)
+		return nil, err
 	}
 	defer endSSHSession(sess)
 
@@ -1069,7 +1094,7 @@ func fetchFortiGateInterfaces(hostname *string, port *int, username *string, pas
 
 	output, err := runSingleCommand(sess, "get system interface | grep ==")
 	if err != nil {
-		return nil, fmt.Errorf("command failed: %w", err)
+		return nil, fmt.Errorf("failed to query interfaces: %w", err)
 	}
 
 	interfaces := []string{"any"}
