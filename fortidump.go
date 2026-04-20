@@ -3,7 +3,7 @@ package main
 // Wireshark EXTCAP extension for capturing packets on a Fortigate.
 // Tested with FortiOS 7.4.6, FortiOS 7.2.10, FortiOS 7.6.5
 // Author: Sander Zegers
-// Version: 0.5.1
+// Version: 0.6.0
 // License: GNU General Public License v2.0
 
 // TODO: Fortigate pre-login-banner / post-login-banner support
@@ -214,6 +214,11 @@ var headerLineRe = regexp.MustCompile(`^(\d+)\.(\d+)\s+(\S+)\s+(\S+)`)
 // bufio.Scanner with default ScanLines strips \r from \r\n, so a bare \r\n line → "".
 var commandPromptRe = regexp.MustCompile(`^\r?$`)
 
+// ifaceEntryRe matches interface name entries in the output of
+// "get system interface | grep ==". Each entry looks like "== [ wan1 ]".
+// All entries may arrive on a single line separated by \r.
+var ifaceEntryRe = regexp.MustCompile(`==\s*\[\s*(\S+)\s*\]`)
+
 // pcapErrorRe matches sniffer startup error messages returned by FortiGate.
 var pcapErrorRe = regexp.MustCompile(`^pcap_compile:|^pcap_activate:|^Command fail`)
 
@@ -364,7 +369,7 @@ func extcapConfig() {
 	fmt.Println("arg {number=0}{call=--host}{display=Fortigate Address}{type=string}{tooltip=IP address or hostname of the FortiGate firewall}{required=true}{group=Server}")
 	fmt.Println("arg {number=1}{call=--port}{display=Fortigate SSH Port}{type=unsigned}{tooltip=SSH port used to connect to the FortiGate (default: 22)}{range=1,65535}{default=22}{required=true}{group=Server}")
 	fmt.Println("arg {number=2}{call=--capture-filter}{display=Capture Filter}{type=string}{tooltip=Capture filter in tcpdump syntax. Leave empty to capture all traffic. The SSH management session is excluded automatically. Example: not port 443}{required=false}{group=Server}")
-	fmt.Println("arg {number=3}{call=--capture-interface}{display=Interface}{type=string}{tooltip=FortiGate interface to capture on (e.g. port1, any). Use any to capture on all interfaces.}{default=any}{required=true}{group=Server}")
+	fmt.Println("arg {number=3}{call=--capture-interface}{display=Interface}{type=editselector}{default=any}{tooltip=Type an interface name, or click reload to fetch the list from the FortiGate.}{reload=true}{placeholder=Fetch from FortiGate}{required=true}{group=Server}")
 	fmt.Println("arg {number=10}{call=--packetlimit}{display=Packet count}{type=unsigned}{tooltip=Maximum number of packets to capture. Set to 0 for unlimited.}{default=1000}{required=true}{group=Server}")
 
 	// Authentication Tab
@@ -383,7 +388,7 @@ func extcapConfig() {
 }
 
 func extcapVersion() {
-	fmt.Println("extcap {version=0.5.1}{help=https://sanderzegers.github.io/fortigate-extcap/}")
+	fmt.Println("extcap {version=0.6.0}{help=https://sanderzegers.github.io/fortigate-extcap/}")
 }
 
 func extcapInterfaces() {
@@ -440,6 +445,7 @@ func main() {
 	extcapVersionArg := flag.String("extcap-version", "", "Shows the version of this utility")
 	extcapDtls := flag.Bool("extcap-dlts", false, "Provide a list of dlts for the given interface")
 	extcapConfigArg := flag.Bool("extcap-config", false, "Provide a list of configurations for the given interface")
+	extcapReloadOption := flag.String("extcap-reload-option", "", "Reload values for the given option")
 	_ = flag.String("extcap-capture-filter", "", "Used together with capture to provide a capture filter") // TODO: Find better way to integrate the wireshark filter
 	extcapFifo := flag.String("fifo", "", "Use together with capture to provide the fifo to dump data to")
 
@@ -518,7 +524,7 @@ func main() {
 		return
 	}
 
-	if *extcapConfigArg {
+	if *extcapConfigArg && *extcapReloadOption == "" {
 		extcapConfig()
 		return
 	}
@@ -530,6 +536,24 @@ func main() {
 
 	if *extcapVersionArg != "" {
 		extcapVersion()
+		return
+	}
+
+	if *extcapReloadOption == "capture-interface" {
+		interfaces, err := fetchFortiGateInterfaces(extcapHost, extcapPort, extcapUsername, extcapPassword)
+		if err != nil {
+			debuglog(logLevelWarn, "fetchFortiGateInterfaces failed: %s", err)
+			fmt.Fprintf(os.Stderr, "Failed to fetch interfaces: %s\n", err)
+			fmt.Println(`value {arg=3}{value=any}{display=any}{default=true}`)
+		} else {
+			for i, iface := range interfaces {
+				if i == 0 {
+					fmt.Printf("value {arg=3}{value=%s}{display=%s}{default=true}\n", iface, iface)
+				} else {
+					fmt.Printf("value {arg=3}{value=%s}{display=%s}\n", iface, iface)
+				}
+			}
+		}
 		return
 	}
 
@@ -977,6 +1001,114 @@ func buildEffectiveFilter(hostname string, port int, userFilter string) string {
 	return fmt.Sprintf("%s and (%s)", sshExclude, userFilter)
 }
 
+// enterVdomIfNeeded parses the output of "get system status" and, when
+// multi-VDOM mode is active, navigates the SSH session into the current VDOM
+// with "config vdom" + "edit <name>". This mirrors the context that
+// "diagnose sniffer packet" uses so that interface queries return the same
+// set of interfaces that are actually capturable.
+func enterVdomIfNeeded(sshSession *sshShell, statusOut string) error {
+	vdomActive := false
+	for _, line := range strings.Split(statusOut, "\n") {
+		if strings.Contains(line, "Virtual domain configuration:") {
+			vdomActive = !strings.Contains(line, "disable")
+			debuglog(logLevelInfo, "VDOM configuration line: %q (active: %v)", strings.TrimSpace(line), vdomActive)
+			break
+		}
+	}
+	if !vdomActive {
+		debuglog(logLevelInfo, "Single-VDOM mode detected, skipping VDOM entry")
+		return nil
+	}
+
+	debuglog(logLevelInfo, "Multi-VDOM mode detected, looking for current VDOM")
+	vdomName := ""
+	for _, line := range strings.Split(statusOut, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "Current virtual domain:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				vdomName = strings.TrimSpace(parts[1])
+			}
+			break
+		}
+	}
+	if vdomName == "" {
+		return fmt.Errorf("multi-VDOM mode is enabled but could not determine current VDOM from 'get system status'")
+	}
+	debuglog(logLevelInfo, "Entering VDOM: %s", vdomName)
+	if _, err := runSingleCommand(sshSession, "config vdom"); err != nil {
+		return err
+	}
+	if _, err := runSingleCommand(sshSession, fmt.Sprintf("edit %s", vdomName)); err != nil {
+		return err
+	}
+	debuglog(logLevelInfo, "Entered VDOM %s successfully", vdomName)
+	return nil
+}
+
+// fetchFortiGateInterfaces SSHes into the FortiGate, navigates into the
+// correct VDOM context (mirroring startCaptureSession), and returns the list
+// of interface names from "get system interface | grep ==".
+// "any" is always prepended as the first entry.
+func fetchFortiGateInterfaces(hostname *string, port *int, username *string, password *string) ([]string, error) {
+	if *hostname == "" || *username == "" {
+		return nil, fmt.Errorf("fill in the FortiGate address and username, then click reload")
+	}
+
+	// Overall timeout for the entire fetch operation. The individual SSH
+	// connection and command timeouts are shorter, but this guards against
+	// the total time exceeding what is reasonable for a UI reload action.
+	type result struct {
+		ifaces []string
+		err    error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		ifaces, err := doFetchInterfaces(hostname, port, username, password)
+		ch <- result{ifaces, err}
+	}()
+
+	const fetchTimeout = 15 * time.Second
+	select {
+	case r := <-ch:
+		return r.ifaces, r.err
+	case <-time.After(fetchTimeout):
+		return nil, fmt.Errorf("timed out after %s — verify the FortiGate address (%s:%d) is reachable", fetchTimeout, *hostname, *port)
+	}
+}
+
+// doFetchInterfaces performs the actual SSH connection and interface query.
+func doFetchInterfaces(hostname *string, port *int, username *string, password *string) ([]string, error) {
+	sess, err := newSSHSession(username, password, hostname, port)
+	if err != nil {
+		return nil, err
+	}
+	defer endSSHSession(sess)
+
+	statusOut, err := runSingleCommand(sess, "get system status")
+	if err != nil {
+		return nil, fmt.Errorf("get system status failed: %w", err)
+	}
+	if err := enterVdomIfNeeded(sess, statusOut); err != nil {
+		return nil, err
+	}
+
+	output, err := runSingleCommand(sess, "get system interface | grep ==")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query interfaces: %w", err)
+	}
+
+	interfaces := []string{"any"}
+	seen := map[string]bool{"any": true}
+	for _, m := range ifaceEntryRe.FindAllStringSubmatch(output, -1) {
+		name := m[1]
+		if !seen[name] {
+			seen[name] = true
+			interfaces = append(interfaces, name)
+		}
+	}
+	return interfaces, nil
+}
+
 func startCaptureSession(filename *string, username *string, password *string, hostname *string, port *int, captureInterface *string, captureFilter *string, packetlimit *int) error {
 
 	debuglog(logLevelInfo, "startCaptureSession starting")
@@ -1025,40 +1157,8 @@ func startCaptureSession(filename *string, username *string, password *string, h
 	}
 	debuglog(logLevelDebug, "get system status output: %s", statusOut)
 
-	vdomActive := false
-	for _, line := range strings.Split(statusOut, "\n") {
-		if strings.Contains(line, "Virtual domain configuration:") {
-			vdomActive = !strings.Contains(line, "disable")
-			debuglog(logLevelInfo, "VDOM configuration line: %q (active: %v)", strings.TrimSpace(line), vdomActive)
-			break
-		}
-	}
-
-	if vdomActive {
-		debuglog(logLevelInfo, "Multi-VDOM mode detected, looking for current VDOM")
-		vdomName := ""
-		for _, line := range strings.Split(statusOut, "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "Current virtual domain:") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					vdomName = strings.TrimSpace(parts[1])
-				}
-				break
-			}
-		}
-		if vdomName == "" {
-			return fmt.Errorf("multi-VDOM mode is enabled but could not determine current VDOM from 'get system status'")
-		}
-		debuglog(logLevelInfo, "Entering VDOM: %s", vdomName)
-		if _, err := runSingleCommand(sshSession, "config vdom"); err != nil {
-			return err
-		}
-		if _, err := runSingleCommand(sshSession, fmt.Sprintf("edit %s", vdomName)); err != nil {
-			return err
-		}
-		debuglog(logLevelInfo, "Entered VDOM %s successfully", vdomName)
-	} else {
-		debuglog(logLevelInfo, "Single-VDOM mode detected, skipping VDOM entry")
+	if err := enterVdomIfNeeded(sshSession, statusOut); err != nil {
+		return err
 	}
 
 	// Send SSH keepalives to prevent the connection from being dropped by
