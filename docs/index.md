@@ -18,7 +18,7 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 
   You can install extcap plugins in either the global or personal extcap path. The global path requires admin permissions but makes the plugin available to all users on the system.
 
-  ![wireshark about folders](..\images\about_wireshark_folders.png)
+  ![wireshark about folders](../images/about_wireshark_folders.png)
 
 3. Copy the binary to the extcap folder.
 
@@ -36,13 +36,13 @@ This plugin lets you capture packets directly from a FortiGate firewall into Wir
 
 After succseful installation, the extcap plugin should become visible as Fortigate Remote Capture. Click on the gear icon to configure the settings.
 
-![wireshark capture options](..\images\wireshark_capture_options.png)
+![wireshark capture options](../images/wireshark_capture_options.png)
 
 ## Configuration
 
 ### Server Tab
 
-![wireshark server tab](..\images\wireshark_fortidump_server.png)
+![wireshark server tab](../images/wireshark_fortidump_server.png)
 
 | Field | Description |
 |---|---|
@@ -56,7 +56,7 @@ After succseful installation, the extcap plugin should become visible as Fortiga
 
 **Capture Interface:** Wireshark displays the FortiGate interface name for each packet (shown in the frame details under *Interface name*). It also records whether the traffic is inbound or outbound relative to the FortiGate. 
 
-![wireshark capture details](..\images\capture_packet_interface.png)
+![wireshark capture details](../images/capture_packet_interface.png)
 
 
 
@@ -66,7 +66,7 @@ After succseful installation, the extcap plugin should become visible as Fortiga
 
 ### Authentication Tab
 
-![wireshark authentication tab](..\images\wireshark_fortidump_authentication.png)
+![wireshark authentication tab](../images/wireshark_fortidump_authentication.png)
 
 | Field | Description |
 |---|---|
@@ -116,7 +116,7 @@ end
 
 ### Debug Tab
 
-![wireshark debug tab](..\images\wireshark_fortidump_debug.png)
+![wireshark debug tab](../images/wireshark_fortidump_debug.png)
 
 | Field | Description |
 |---|---|
