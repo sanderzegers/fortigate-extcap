@@ -3,7 +3,7 @@ package main
 // Wireshark EXTCAP extension for capturing packets on a Fortigate.
 // Tested with FortiOS 7.4.6, FortiOS 7.2.10, FortiOS 7.6.5
 // Author: Sander Zegers
-// Version: 0.5.1
+// Version: 0.6.0
 // License: GNU General Public License v2.0
 
 // TODO: Fortigate pre-login-banner / post-login-banner support
@@ -388,7 +388,7 @@ func extcapConfig() {
 }
 
 func extcapVersion() {
-	fmt.Println("extcap {version=0.5.1}{help=https://sanderzegers.github.io/fortigate-extcap/}")
+	fmt.Println("extcap {version=0.6.0}{help=https://sanderzegers.github.io/fortigate-extcap/}")
 }
 
 func extcapInterfaces() {
