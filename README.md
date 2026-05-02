@@ -1,4 +1,4 @@
-# Wireshark Extcap extension for Fortigate
+# Wireshark Extcap extension for FortiGate
 
 [![License](https://img.shields.io/badge/license-GPLv2-blue.svg)](LICENSE)
 
@@ -21,23 +21,16 @@ With this Wireshark Extcap plugin, you can capture traffic from FortiGate firewa
   
 ## Installation
 
-1. Download the Latest Version
- - Visit the [Releases](https://github.com/sanderzegers/fortigate-extcap/releases/) page and download the version that matches your platform.
+1. Download the binary for your platform from the [Releases](https://github.com/sanderzegers/fortigate-extcap/releases/) page.
+2. Copy it to your Wireshark extcap folder: open Wireshark, go to **Help → About Wireshark → Folders → Personal Extcap Path**, and click the location to open it.
+3. Linux/macOS only: make the binary executable: `chmod a+x fortigate-extcap`
+4. Restart Wireshark. The plugin appears as **FortiGate Remote Capture** in the capture interface list.
 
-2. Locate the Personal Extcap Folder
- - Open Wireshark.
- - Navigate to Help → About Wireshark → Folders → Personal Extcap Path.
- - Click the Location to open the Extcap folder.
-
-3. Copy the binary to the Extcap folder
- - From the downloaded release, copy the fortigate-extcap.exe (or the appropriate file for your platform) into the "Personal Extcap Path" directory.
-
-4. Restart Wireshark
- - Restart Wireshark to load the custom Extcap extension.
+For more detail, see the [Help Documentation](docs/index.md#installation).
 
 ## Usage
 
-Once installed, the plugin appears in Wireshark's capture options as **Fortigate Remote Capture (SSH): fortidump**. Click the gear icon to enter the FortiGate address, credentials, and capture settings, then double-click the interface to start capturing.
+Once installed, the plugin appears in Wireshark's capture options as **FortiGate Remote Capture (SSH)**. The interface is listed as `fortidump` — this is the plugin's internal identifier. Click the gear icon to enter the FortiGate address, credentials, and capture settings, then double-click the interface to start capturing.
 
 For detailed configuration, authentication setup, and troubleshooting, see the [Help Documentation](docs/index.md).
 
@@ -46,7 +39,7 @@ For detailed configuration, authentication setup, and troubleshooting, see the [
 To build the binary on your local machine, make sure Go and Git are installed. 
 You can find the plugin folder location in the installation instructions.
 
-Prerequisites: go and git
+Prerequisites: go and git (example for Debian-based systems):
 ```bash
 apt install git golang-go
 ```

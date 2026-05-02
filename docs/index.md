@@ -24,7 +24,7 @@ Already have Wireshark installed? Here's the short version:
 1. Download the binary for your platform from the [Releases](https://github.com/sanderzegers/fortigate-extcap/releases/) page.
 2. Copy it to your Wireshark extcap folder: open Wireshark, go to **Help → About Wireshark → Folders → Personal Extcap Path**, and click the location to open it.
 3. Linux/macOS only: make the binary executable: `chmod a+x fortigate-extcap`
-4. Restart Wireshark. The plugin appears as **Fortigate Remote Capture** in the capture interface list.
+4. Restart Wireshark. The plugin appears as **FortiGate Remote Capture** in the capture interface list.
 
 For first-time setup or more detail, see [Installation](#installation) below.
 
@@ -58,7 +58,7 @@ For first-time setup or more detail, see [Installation](#installation) below.
 
 ## Starting First Capture
 
-After successful installation, the extcap plugin should become visible as **Fortigate Remote Capture** in Wireshark's capture interface list.
+After successful installation, the extcap plugin should become visible as **FortiGate Remote Capture** in Wireshark's capture interface list.
 
 - **First use:** click the gear icon to open the capture settings, configure the FortiGate address and credentials, then click **Start** to begin capturing without leaving the dialog.
 - **Subsequent use:** double-clicking the interface skips the dialog and starts a capture immediately using the last saved settings.
