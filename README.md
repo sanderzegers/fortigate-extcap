@@ -63,11 +63,6 @@ cp fortigate-extcap $HOME/.local/lib/wireshark/extcap/fortigate-extcap
 
 - Capture speed is limited by the FortiGate's text-based hexdump output over SSH. See [Help Documentation](docs/index.md#known-limitations) for details.
 
-## Windows Defender false positive
-The Windows binary may be flagged by Microsoft Defender (`Trojan:Win32/Wacatac.B!ml`). This is a known false positive affecting Go binaries that use SSH and cryptography libraries. The source code is fully open and available in this repository.
-
-To resolve this, add an exclusion in Windows Defender for the extcap folder.
-
 ## License
 
 This project is licensed under the [GNU General Public License v2.0](LICENSE).
